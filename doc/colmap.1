@@ -1,39 +1,234 @@
-.TH colmap 1 "January 4 2018"
+.TH colmap 1 "June 2026" "COLMAP 4.1" "COLMAP Manual"
 .SH NAME
-colmap \- Structure-from-Motion and Multi-View Stereo
+colmap \- Structure-from-Motion and Multi-View Stereo pipeline
 .SH SYNOPSIS
 .B colmap
-.RI "[command] [options]"
-.SH DESCRIPTION
-This manual page documents briefly the
+.I command
+.RI [ options ]
+.br
 .B colmap
-command.
+.RI [ help | \-h | \-\-help ]
+.br
+.B colmap
+.RI [ version | \-v ]
+.br
+.B colmap system_info
+.RI [ \-\-format " {text,json}]"
+.SH DESCRIPTION
+.B COLMAP
+is a general-purpose Structure-from-Motion (SfM) and Multi-View Stereo (MVS)
+pipeline with a graphical and command-line interface. It reconstructs sparse
+and dense 3D models from ordered or unordered image collections.
 .PP
-COLMAP is a general-purpose Structure-from-Motion (SfM) and Multi-View
-Stereo (MVS) pipeline with a graphical and command-line interface. It offers
-a wide range of features for reconstruction of ordered and unordered image
-collections.
-.SH OPTIONS
-This program offers a graphical and command-line interface. Each command
-offers summary of all available options.
+Each command exposes its own options; run
+.B colmap
+.I command
+.B \-h
+for the full list. Options may also be supplied via an INI project file with
+.BR \-\-project_path .
+.SH COMMANDS BY PIPELINE STAGE
+.SS Automatic
 .TP
-.B help [ \-h, \-\-help ]
-Show summary of all options.
+.B automatic_reconstructor
+End-to-end reconstruction (extraction, matching, mapping, and \(em when a CUDA
+GPU is present \(em dense MVS).
+.SS Feature extraction & matching
 .TP
-.B gui
-Start graphical interface.
+.B feature_extractor
+Detect and describe features (SIFT on CPU/GPU, or ALIKED via ONNX).
 .TP
-.B gui \-h [ \-\-help ]
-Show summary of graphical interface options.
+.B exhaustive_matcher
+Match every image pair. Best for small/medium unordered sets.
 .TP
-.B feature_extractor \-h [ \-\-help ]
-Show summary of feature extractor options.
+.B sequential_matcher
+Match temporally adjacent frames; ideal for video.
 .TP
-.B feature_extractor \-\-image_path IMAGES \-\-database_path DATABASE
-Extract features for images in the given folder and store them in the database.
-.br
+.B vocab_tree_matcher
+Retrieve candidate pairs via a vocabulary tree. Use for
+.I large
+collections (thousands of images); see TUNING below.
 .TP
-.B ...
-.br
-.SH ONLINE DOCUMENTATION
-The program is documented at https://colmap.github.io/
+.B spatial_matcher \fR, \fB transitive_matcher \fR, \fB feature_importer \fR, \fB matches_importer
+Additional pairing/import strategies.
+.SS Sparse reconstruction (SfM)
+.TP
+.B mapper
+Incremental SfM. The most robust, accurate default.
+.TP
+.B global_mapper
+Global SfM (the integrated GLOMAP pipeline). Faster on large, well-connected
+collections; see MAPPER SELECTION.
+.TP
+.B hierarchical_mapper
+Cluster \(-> map \(-> merge for very large scenes.
+.TP
+.B bundle_adjuster \fR, \fB point_triangulator \fR, \fB point_filtering \fR, \fB rotation_averager
+Refinement and sub-steps.
+.SS Dense reconstruction (MVS, requires CUDA)
+.TP
+.B patch_match_stereo \fR, \fB stereo_fusion \fR, \fB poisson_mesher \fR, \fB delaunay_mesher \fR, \fB advancing_front_mesher
+Dense depth estimation, fusion, and meshing.
+.B Note:
+these require a CUDA GPU and are unavailable on macOS in this build.
+.SS Model, database & image tools
+.TP
+.B model_analyzer
+Report reconstruction statistics (registered images, points, track length,
+reprojection error).
+.TP
+.B model_converter \fR, \fB model_aligner \fR, \fB model_merger \fR, \fB model_cropper \fR, ...
+Model manipulation.
+.TP
+.B database_creator \fR, \fB database_cleaner \fR, \fB database_merger
+Database utilities.
+.TP
+.B image_undistorter \fR, \fB image_rectifier \fR, \fB image_registrator \fR, ...
+Image utilities.
+.SS Diagnostics
+.TP
+.B system_info
+Print detected CPU/RAM/core topology, OpenMP threads, recommended extraction
+thread count, and build configuration.
+.B \-\-format json
+emits a single JSON object for tooling and bug reports.
+.SH GLOBAL OPTIONS
+These apply to every command (via
+.BR BaseOptionManager ).
+.TP
+.BI \-\-progress_format " {none,plain,jsonl}"
+Emit machine-readable progress events on
+.B stdout
+(default
+.BR none ,
+i.e. unchanged behavior). glog output stays on stderr.
+.B jsonl
+is recommended for pipeline orchestrators.
+.TP
+.BI \-\-progress_every " N"
+Progress emit cadence in items (0 = per-stage default).
+.TP
+.B \-\-quiet
+Suppress non-essential INFO logging.
+.TP
+.BI \-\-log_level " N"
+glog verbosity (higher = more verbose).
+.TP
+.BI \-\-project_path " PATH"
+Load all options from an INI project file.
+.SH RESOURCE-AWARE OPTIONS
+.TP
+.BI \-\-FeatureExtraction.num_threads " N"
+CPU extraction threads. Default
+.B \-1
+(automatic). On Apple Silicon the automatic value uses the
+.I performance
+cores (not every logical core), which is both faster and lighter; symmetric
+CPUs are unaffected.
+.TP
+.BI \-\-FeatureExtraction.max_memory_gb " G"
+Soft RAM budget (GiB) for CPU SIFT extraction. When > 0 the thread count is
+reduced so the estimated working set fits the budget \(em useful on
+memory-constrained machines (e.g. 16 GB laptops). 0 (default) disables the cap.
+.TP
+.BI \-\-FeatureExtraction.max_image_size " N"
+Down-scale images whose longer side exceeds
+.IR N .
+.TP
+.BI \-\-SiftExtraction.first_octave " N"
+First scale-space octave.
+.B \-1
+(default) up-samples the image 2x before detection \(em helpful for small/
+low-resolution images but
+.I 4x
+the memory and time. For images larger than ~2 MP, setting
+.B 0
+typically yields equivalent reconstruction quality at a large memory and speed
+saving (measured: 3.8x faster extraction, 3.8x less RAM, equivalent registered
+images / reprojection error).
+.SH MAPPER SELECTION
+.TP
+.B mapper \fR (incremental)
+Default. Most robust and accurate; best for small/medium sets, sequential
+video, or weakly connected match graphs.
+.TP
+.B global_mapper \fR (GLOMAP)
+Faster on large, well-connected, unordered/internet collections. Needs a
+well-conditioned view graph.
+.TP
+.B hierarchical_mapper
+Very large scenes that exceed a single-pass budget.
+.SH TUNING
+.PP
+.B Vocabulary-tree matching
+prunes image pairs only when
+.B \-\-VocabTreeMatching.num_images
+is much smaller than the total image count. On small/medium sets the default
+(100) retrieves nearly every image, so it is no faster than
+.B exhaustive_matcher
+while adding index overhead. Prefer
+.B exhaustive_matcher
+for hundreds of images; reserve
+.B vocab_tree_matcher
+(with a modest
+.BR num_images )
+for thousands.
+.PP
+On a 16 GB Apple Silicon machine, a good low-footprint recipe is:
+.RS
+.nf
+colmap feature_extractor --image_path IMAGES --database_path DB \\
+    --SiftExtraction.first_octave 0 --FeatureExtraction.max_memory_gb 6
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Generic failure.
+.TP
+.B 2
+Invalid command-line arguments.
+.TP
+.B 3
+Failed to load required input (database/images/model).
+.TP
+.B 4
+GPU/Metal/CUDA initialization failure.
+.TP
+.B 5
+Failed to write output.
+.TP
+.B 130 \fR/\fB 143
+Interrupted by SIGINT/SIGTERM after a clean partial save.
+.SH EXAMPLES
+.PP
+End-to-end on a 16 GB Mac, low memory footprint:
+.RS
+.nf
+colmap feature_extractor --image_path IMAGES --database_path DB \\
+    --SiftExtraction.first_octave 0 --FeatureExtraction.max_memory_gb 6
+colmap exhaustive_matcher --database_path DB
+colmap mapper --image_path IMAGES --database_path DB --output_path SPARSE
+colmap model_analyzer --path SPARSE/0
+.fi
+.RE
+.PP
+Driven by an orchestrator (machine-readable progress):
+.RS
+.nf
+colmap mapper --image_path IMAGES --database_path DB \\
+    --output_path SPARSE --progress_format jsonl
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.cache/colmap/
+Cached downloads (vocabulary trees, ONNX models).
+.SH SEE ALSO
+Full documentation at
+.UR https://colmap.github.io/
+.UE .
+.SH AUTHORS
+COLMAP is developed by Johannes L. Schoenberger and contributors.

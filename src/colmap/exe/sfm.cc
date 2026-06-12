@@ -33,12 +33,14 @@
 #include "colmap/controllers/bundle_adjustment.h"
 #include "colmap/controllers/global_pipeline.h"
 #include "colmap/controllers/hierarchical_pipeline.h"
+#include "colmap/controllers/mapper_selection.h"
 #include "colmap/controllers/option_manager.h"
 #include "colmap/controllers/rotation_averaging.h"
 #include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/estimators/solvers/similarity_transform.h"
 #include "colmap/estimators/view_graph_calibration.h"
 #include "colmap/exe/gui.h"
+#include "colmap/scene/database.h"
 #include "colmap/scene/reconstruction.h"
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/file.h"
@@ -116,7 +118,7 @@ int RunAutomaticReconstructor(int argc, char** argv) {
   options.AddDefaultOption("dense", &reconstruction_options.dense);
   options.AddDefaultOption("feature", &feature, "{sift, aliked}");
   options.AddDefaultOption(
-      "mapper", &mapper, "{incremental, hierarchical, global}");
+      "mapper", &mapper, "{incremental, hierarchical, global, auto}");
   options.AddDefaultOption("mesher", &mesher, "{poisson, delaunay}");
   options.AddDefaultOption("num_threads", &reconstruction_options.num_threads);
   options.AddDefaultOption("random_seed", &reconstruction_options.random_seed);
@@ -390,6 +392,62 @@ bool RunGlobalMapperImpl(
 
   reconstruction_manager->Write(output_path);
   return true;
+}
+
+int RunMapperAdvisor(int argc, char** argv) {
+  std::string format = "text";
+  bool is_video = false;
+  OptionManager options;
+  options.AddDatabaseOptions();
+  options.AddDefaultOption("format", &format, "{text, json}");
+  options.AddDefaultOption(
+      "video", &is_video, "treat the capture as sequential/video");
+  if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+
+  auto database = Database::Open(*options.database_path);
+  const int num_images = static_cast<int>(database->NumImages());
+  const size_t num_pairs = database->NumVerifiedImagePairs();
+  double density = -1.0;
+  if (num_images >= 2) {
+    const double max_pairs =
+        0.5 * static_cast<double>(num_images) * (num_images - 1);
+    if (max_pairs > 0) {
+      density = static_cast<double>(num_pairs) / max_pairs;
+    }
+  }
+
+  MapperSelectionStats stats;
+  stats.num_images = num_images;
+  stats.view_graph_density = density;
+  stats.is_video = is_video;
+  const MapperRecommendation rec = SelectMapper(stats);
+
+  if (format == "json") {
+    std::cout << "{\"recommended_mapper\":\""
+              << RecommendedMapperToString(rec.mapper) << "\""
+              << ",\"num_images\":" << num_images
+              << ",\"verified_image_pairs\":" << num_pairs
+              << ",\"view_graph_density\":" << density
+              << ",\"is_video\":" << (is_video ? "true" : "false")
+              << ",\"rationale\":\"" << rec.rationale << "\"}\n";
+  } else {
+    std::cout << "Mapper recommendation: "
+              << RecommendedMapperToString(rec.mapper) << "\n";
+    std::cout << "  Images:             " << num_images << "\n";
+    std::cout << "  Verified pairs:     " << num_pairs << "\n";
+    std::cout << "  View-graph density: " << density << "\n";
+    std::cout << "  Rationale:          " << rec.rationale << "\n";
+    std::cout << "\nRun with: colmap "
+              << (rec.mapper == RecommendedMapper::kIncremental
+                      ? "mapper"
+                      : (rec.mapper == RecommendedMapper::kGlobal
+                             ? "global_mapper"
+                             : "hierarchical_mapper"))
+              << " ...\n";
+  }
+  return EXIT_SUCCESS;
 }
 
 int RunGlobalMapper(int argc, char** argv) {

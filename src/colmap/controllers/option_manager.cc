@@ -248,6 +248,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                    &feature_extraction->gpu_index);
   AddDefaultOption("FeatureExtraction.max_image_size",
                    &feature_extraction->max_image_size);
+  AddDefaultOption("FeatureExtraction.max_memory_gb",
+                   &feature_extraction->max_memory_gb);
 
   AddDefaultOption("SiftExtraction.max_num_features",
                    &feature_extraction->sift->max_num_features);

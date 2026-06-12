@@ -1,0 +1,46 @@
+#compdef colmap
+# Zsh completion for the `colmap` CLI.
+#
+# Install: place this file (named `_colmap`) in a directory on your $fpath, e.g.
+#   $(brew --prefix)/share/zsh/site-functions/_colmap   (Homebrew)
+#   ~/.zsh/completions/_colmap   (then `fpath=(~/.zsh/completions $fpath)`)
+# then restart zsh or run `compinit`.
+#
+# Commands are queried from `colmap help` at completion time, so the list never
+# goes stale.
+
+_colmap() {
+  local -a cmds
+  if (( CURRENT == 2 )); then
+    cmds=(${(f)"$(colmap help 2>/dev/null | awk '
+      /Available commands:/ { in_cmds = 1; next }
+      in_cmds && NF { sub(/^[[:space:]]+/, \"\"); print $1 }')"})
+    _describe -t commands 'colmap command' cmds
+    return
+  fi
+
+  # After the subcommand: complete path-valued options and files.
+  case "$words[CURRENT-1]" in
+    --database_path|--image_path|--project_path|--output_path|--input_path|--path|--workspace_path|--vocab_tree_path|--export_path|--import_path)
+      _files; return;;
+    --progress_format)
+      _values 'format' none plain jsonl; return;;
+    --format)
+      _values 'format' text json; return;;
+  esac
+
+  if [[ "$words[CURRENT]" == -* ]]; then
+    local -a flags
+    flags=(
+      '--help' '--project_path' '--database_path' '--image_path' '--output_path'
+      '--progress_format' '--progress_every' '--quiet' '--log_level'
+      '--FeatureExtraction.use_gpu' '--FeatureExtraction.max_memory_gb'
+      '--SiftExtraction.first_octave' '--FeatureMatching.use_gpu'
+    )
+    _describe -t options 'colmap option' flags
+  else
+    _files
+  fi
+}
+
+_colmap "$@"

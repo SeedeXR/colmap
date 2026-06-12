@@ -36,6 +36,7 @@
 #include "colmap/scene/database.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/progress.h"
 #include "colmap/util/timer.h"
 
 #include <fstream>
@@ -204,6 +205,12 @@ class FeatureMatcherThread : public Thread {
     std::unique_ptr<PairGenerator> pair_generator =
         THROW_CHECK_NOTNULL(pair_generator_factory_());
 
+    // The pair generator streams blocks, so the total is not known upfront
+    // (total = -1 -> orchestrators show an indeterminate bar). See
+    // memory/process_contract.md.
+    ProgressReporter::Default().StageStarted("matching", /*total=*/-1);
+    int64_t block_idx = 0;
+
     while (!pair_generator->HasFinished()) {
       if (IsStopped()) {
         run_timer.PrintMinutes();
@@ -215,8 +222,14 @@ class FeatureMatcherThread : public Thread {
           pair_generator->Next();
       matcher_.Match(image_pairs);
       LOG(INFO) << StringPrintf("in %.3fs", timer.ElapsedSeconds());
+      ProgressReporter::Default().Progress("matching",
+                                           ++block_idx,
+                                           /*total=*/-1,
+                                           timer.ElapsedSeconds() * 1000.0);
     }
 
+    ProgressReporter::Default().StageCompleted("matching",
+                                               run_timer.ElapsedSeconds());
     run_timer.PrintMinutes();
 
     // Notice that we run rig verification after feature matching, because

@@ -35,12 +35,113 @@
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/opengl_utils.h"
+#include "colmap/util/progress.h"
+#include "colmap/util/string.h"
+#include "colmap/util/sysinfo.h"
 #include "colmap/util/timer.h"
 
+#include <algorithm>
+#include <cmath>
 #include <numeric>
 
 namespace colmap {
 namespace {
+
+// Estimates peak resident memory (bytes) of a single CPU SIFT extractor worker
+// for an image of `image_pixels` pixels at the given `first_octave`. Calibrated
+// against on-device measurements (Apple M4, VLFeat CPU SIFT): ~1.8 GB resident
+// per concurrent 7.08 MP extraction at first_octave=-1, i.e. ~64 bytes per
+// base-octave pixel. The Gaussian scale space (and thus memory) scales with the
+// base-octave pixel count = image_pixels * 4^(-first_octave) for first_octave<0
+// (the default first_octave=-1 upsamples the image 2x -> 4x pixels). See
+// memory/handover_session.md (2026-06-12 profiling) for the underlying data.
+uint64_t EstimateSiftWorkerBytes(uint64_t image_pixels, int first_octave) {
+  const int upsample = first_octave < 0 ? -first_octave : 0;
+  const double base_pixels =
+      static_cast<double>(image_pixels) * std::pow(4.0, upsample);
+  constexpr double kBytesPerBasePixel = 64.0;
+  return static_cast<uint64_t>(base_pixels * kBytesPerBasePixel);
+}
+
+// Resource-aware effective thread count for CPU feature extraction.
+//
+// Returns the historical GetEffectiveNumThreads() value EXCEPT when the thread
+// count is automatic (num_threads <= 0) AND extraction runs on the CPU, in
+// which case it:
+//   (a) prefers performance cores on asymmetric CPUs (Apple Silicon P-cores).
+//       On symmetric CPUs GetNumPerformanceCores() == logical cores, so
+//       Linux/Windows behavior is unchanged; and
+//   (b) optionally caps threads to fit FeatureExtractionOptions::max_memory_gb.
+// GPU extraction and explicit thread counts are never altered. Emits an
+// explanatory log line + progress warning whenever it reduces the count, so
+// the decision is never silent.
+int ComputeCpuExtractionThreads(const FeatureExtractionOptions& options) {
+  const int baseline = GetEffectiveNumThreads(options.num_threads);
+  // Respect explicit thread counts and the GPU path (historical behavior).
+  if (options.num_threads > 0 || options.use_gpu) {
+    return baseline;
+  }
+
+  // Automatic + CPU: prefer performance cores (no change on symmetric CPUs).
+  int threads = std::min(baseline, GetNumPerformanceCores());
+
+  // Optional hard memory budget (SIFT only; ALIKED manages its own RAM).
+  if (options.max_memory_gb > 0.0 &&
+      options.type == FeatureExtractorType::SIFT) {
+    const int eff_size = options.EffMaxImageSize();
+    // Conservative typical-photo (4:3) pixel count at the resize cap.
+    const uint64_t pixels = static_cast<uint64_t>(eff_size) *
+                            (static_cast<uint64_t>(eff_size) * 3 / 4);
+    const int first_octave =
+        options.sift ? options.sift->first_octave : -1;
+    const uint64_t per_thread = EstimateSiftWorkerBytes(pixels, first_octave);
+    constexpr uint64_t kBaseOverheadBytes = 1ull << 30;  // ~1 GB fixed.
+    threads = RecommendNumThreadsForMemory(GiBToBytes(options.max_memory_gb),
+                                           kBaseOverheadBytes,
+                                           per_thread,
+                                           threads);
+  }
+
+  threads = std::max(threads, 1);
+  if (threads < baseline) {
+    LOG(INFO) << "Resource-aware feature extraction: using " << threads
+              << " CPU thread(s) of " << baseline
+              << " available to bound memory. Override with "
+                 "--FeatureExtraction.num_threads.";
+    ProgressReporter::Default().Warning(
+        "feature_extraction",
+        StringPrintf("limited to %d CPU thread(s) of %d to bound memory",
+                     threads,
+                     baseline));
+  }
+  return threads;
+}
+
+// Surfaces the largest measured extraction win (memory/profiling 2026-06-12):
+// for images larger than ~3 MP, SIFT first_octave=0 extracts ~3.8x faster using
+// ~3.8x less RAM at equivalent reconstruction quality, because the default
+// first_octave=-1 upsamples the image 2x (4x the scale-space). We do NOT change
+// the default (small/low-res images legitimately benefit from the upsample, and
+// it would change everyone's results) -- we only hint. Hint once per command.
+void MaybeRecommendFirstOctave(const FeatureExtractionOptions& options) {
+  if (options.use_gpu || options.type != FeatureExtractorType::SIFT ||
+      !options.sift) {
+    return;
+  }
+  constexpr int kLargeImageSizeThreshold = 2000;  // ~3 MP and up.
+  if (options.sift->first_octave < 0 &&
+      options.EffMaxImageSize() >= kLargeImageSizeThreshold) {
+    LOG(INFO) << "Hint: for images this large, "
+                 "--SiftExtraction.first_octave 0 extracts roughly 3.8x faster "
+                 "using ~3.8x less RAM with equivalent reconstruction quality "
+                 "(the default -1 upsamples 2x). Recommended on "
+                 "memory-constrained machines.";
+    ProgressReporter::Default().Warning(
+        "feature_extraction",
+        "consider --SiftExtraction.first_octave 0 for large images "
+        "(faster, less RAM, equivalent quality)");
+  }
+}
 
 void ScaleKeypoints(int bitmap_width,
                     int bitmap_height,
@@ -279,6 +380,10 @@ class FeatureWriterThread : public Thread {
 
         image_index += 1;
 
+        ProgressReporter::Default().Progress("feature_extraction",
+                                             static_cast<int64_t>(image_index),
+                                             static_cast<int64_t>(num_images_));
+
         LOG(INFO) << StringPrintf(
             "Processed file [%d/%d]", image_index, num_images_);
 
@@ -390,8 +495,7 @@ class FeatureExtractorController : public Thread {
       }
     }
 
-    const int num_threads =
-        GetEffectiveNumThreads(extraction_options_.num_threads);
+    const int num_threads = ComputeCpuExtractionThreads(extraction_options_);
     THROW_CHECK_GT(num_threads, 0);
 
     // Make sure that we only have limited number of objects in the queue to
@@ -446,7 +550,12 @@ class FeatureExtractorController : public Thread {
       }
     } else {
       const static FeatureExtractionOptions kDefaultExtractionOptions;
+      // Only warn when we are actually using every logical core (i.e. the
+      // resource-aware logic above did NOT reduce the count). On Apple Silicon
+      // the automatic default now caps to performance cores, which addresses
+      // this concern, so the warning is correctly suppressed there.
       if (extraction_options_.num_threads == -1 &&
+          num_threads == GetEffectiveNumThreads(-1) &&
           extraction_options_.type == FeatureExtractorType::SIFT &&
           extraction_options_.max_image_size ==
               kDefaultExtractionOptions.max_image_size &&
@@ -457,9 +566,10 @@ class FeatureExtractorController : public Thread {
                "threads on the machine to extract features. Extracting SIFT "
                "features on the CPU can consume a lot of RAM per thread for "
                "large images. Consider reducing the maximum image size and/or "
-               "the first octave or manually limit the number of extraction "
-               "threads. Ignore this warning, if your machine has sufficient "
-               "memory for the current settings.";
+               "the first octave, manually limiting the number of extraction "
+               "threads, or setting --FeatureExtraction.max_memory_gb. Ignore "
+               "this warning, if your machine has sufficient memory for the "
+               "current settings.";
       }
 
       int num_extractors = 0;
@@ -504,6 +614,12 @@ class FeatureExtractorController : public Thread {
     LOG_HEADING1("Feature extraction");
     Timer run_timer;
     run_timer.Start();
+
+    ProgressReporter::Default().StageStarted(
+        "feature_extraction",
+        static_cast<int64_t>(image_reader_.NumImages()));
+
+    MaybeRecommendFirstOctave(extraction_options_);
 
     for (auto& resizer : resizers_) {
       resizer->Start();
@@ -570,6 +686,8 @@ class FeatureExtractorController : public Thread {
     writer_queue_->Stop();
     writer_->Wait();
 
+    ProgressReporter::Default().StageCompleted("feature_extraction",
+                                               run_timer.ElapsedSeconds());
     run_timer.PrintMinutes();
   }
 

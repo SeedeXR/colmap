@@ -56,6 +56,7 @@ class BaseOptionManager {
 
   void AddRandomOptions();
   void AddLogOptions();
+  void AddProgressOptions();
   void AddDatabaseOptions();
   void AddImageOptions();
 
@@ -125,6 +126,14 @@ class BaseOptionManager {
   // Log destination choice: {stderr, stdout, file, stderr_and_file}.
   std::string log_target_ = "stderr_and_file";
 
+  // Machine-readable progress channel (see memory/process_contract.md).
+  // {none, plain, jsonl}; default "none" = zero behavior change.
+  std::string progress_format_ = "none";
+  // Progress emit cadence in items/iterations (0 = per-stage default).
+  int progress_every_ = 0;
+  // Suppress non-essential INFO logging (sets glog min severity to WARNING).
+  bool quiet_ = false;
+
   std::vector<std::pair<std::string, const bool*>> options_bool_;
   std::vector<std::pair<std::string, const int*>> options_int_;
   std::vector<std::pair<std::string, const double*>> options_double_;
@@ -142,6 +151,7 @@ class BaseOptionManager {
 
   bool added_random_options_ = false;
   bool added_log_options_ = false;
+  bool added_progress_options_ = false;
   bool added_database_options_ = false;
   bool added_image_options_ = false;
 
@@ -156,6 +166,9 @@ class BaseOptionManager {
 
   // Map simplified log output options to glog flags.
   void ApplyLogFlags();
+
+  // Apply progress/quiet options to the global ProgressReporter and glog.
+  void ApplyProgressFlags();
 };
 
 template <typename T>

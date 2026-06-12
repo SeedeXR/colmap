@@ -31,6 +31,7 @@
 
 #include "colmap/math/random.h"
 #include "colmap/util/file.h"
+#include "colmap/util/progress.h"
 #include "colmap/util/string.h"
 
 #include <fstream>
@@ -55,6 +56,7 @@ BaseOptionManager::BaseOptionManager(bool add_project_options) {
 
   AddRandomOptions();
   AddLogOptions();
+  AddProgressOptions();
 }
 
 void BaseOptionManager::AddRandomOptions() {
@@ -84,6 +86,21 @@ void BaseOptionManager::AddLogOptions() {
 #if COLMAP_GLOG_HAS_COLOR_SUPPORT
   AddDefaultOption("log_color", &FLAGS_colorlogtostderr);
 #endif
+}
+
+void BaseOptionManager::AddProgressOptions() {
+  if (added_progress_options_) {
+    return;
+  }
+  added_progress_options_ = true;
+
+  AddDefaultOption(
+      "progress_format", &progress_format_, "{none, plain, jsonl}");
+  AddDefaultOption("progress_every",
+                   &progress_every_,
+                   "progress emit cadence in items (0 = per-stage default)");
+  AddDefaultOption(
+      "quiet", &quiet_, "suppress non-essential INFO logging");
 }
 
 void BaseOptionManager::AddDatabaseOptions() {
@@ -132,7 +149,11 @@ void BaseOptionManager::ResetImpl(bool reset_logging) {
 #if COLMAP_GLOG_HAS_COLOR_SUPPORT
     FLAGS_colorlogtostderr = true;
 #endif
+    progress_format_ = "none";
+    progress_every_ = 0;
+    quiet_ = false;
     ApplyLogFlags();
+    ApplyProgressFlags();
   }
 
   const bool kResetPaths = true;
@@ -223,6 +244,22 @@ void BaseOptionManager::ApplyLogFlags() {
   }
 }
 
+void BaseOptionManager::ApplyProgressFlags() {
+  ProgressFormat format = ProgressFormat::kNone;
+  if (!ParseProgressFormat(progress_format_, &format)) {
+    LOG(ERROR) << "Invalid progress_format: " << progress_format_
+               << ". Falling back to 'none'.";
+    format = ProgressFormat::kNone;
+  }
+  ProgressReporter::Default().SetFormat(format);
+  ProgressReporter::Default().SetProgressEvery(progress_every_);
+
+  if (quiet_) {
+    // Suppress INFO; keep WARNING and above.
+    FLAGS_minloglevel = std::max(FLAGS_minloglevel, 1);
+  }
+}
+
 void BaseOptionManager::PrintHelp() const {
   LOG(INFO) << "Options can either be specified via command-line or by "
                "defining them in a .ini project file.\n"
@@ -259,6 +296,7 @@ bool BaseOptionManager::Parse(const int argc, char** argv) {
 
     ApplyEnumConversions();
     ApplyLogFlags();
+    ApplyProgressFlags();
     PostParse();
 
   } catch (std::exception& exc) {

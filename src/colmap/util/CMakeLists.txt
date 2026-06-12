@@ -39,6 +39,7 @@ COLMAP_ADD_LIBRARY(
         eigen_alignment.h
         endian.h endian.cc
         enum_utils.h
+        exit_codes.h
         file.h file.cc
         logging.h logging.cc
         glog_macros.h
@@ -46,7 +47,10 @@ COLMAP_ADD_LIBRARY(
         oiio_utils.h oiio_utils.cc
         opengl_utils.h opengl_utils.cc
         ply.h ply.cc
+        progress.h progress.cc
+        signal_handler.h signal_handler.cc
         string.h string.cc
+        sysinfo.h sysinfo.cc
         threading.h threading.cc
         timer.h timer.cc
         types.h
@@ -221,6 +225,21 @@ endif()
 COLMAP_ADD_TEST(
     NAME version_test
     SRCS version_test.cc
+    LINK_LIBS colmap_util
+)
+COLMAP_ADD_TEST(
+    NAME progress_test
+    SRCS progress_test.cc
+    LINK_LIBS colmap_util
+)
+COLMAP_ADD_TEST(
+    NAME signal_handler_test
+    SRCS signal_handler_test.cc
+    LINK_LIBS colmap_util
+)
+COLMAP_ADD_TEST(
+    NAME sysinfo_test
+    SRCS sysinfo_test.cc
     LINK_LIBS colmap_util
 )
 COLMAP_ADD_TEST(

@@ -35,9 +35,13 @@
 
 #include <iostream>
 #include <mutex>
+#include <cstdlib>
 #include <sstream>
 #ifdef _WIN32
 #include <Windows.h>
+#endif
+#if defined(__APPLE__)
+#include <coreml_provider_factory.h>
 #endif
 
 namespace colmap {
@@ -141,6 +145,34 @@ void ONNXModel::InitializeSession(const std::string& model_path,
       cuda_options.device_id = gpu_indices[0];
     }
     session_options_.AppendExecutionProvider_CUDA(cuda_options);
+  }
+#endif
+
+#if defined(__APPLE__)
+  // CoreML execution provider (Apple Neural Engine / GPU). EXPERIMENTAL and
+  // OFF by default: it is gated behind COLMAP_ENABLE_COREML=1 rather than the
+  // generic use_gpu flag because, on this codebase's ONNX models, it is
+  // currently a large performance REGRESSION -- measured 2026-06-12 on Apple
+  // M4, ALIKED-N16ROT @ 3072x2304 ran ~70 s/image under CoreML vs ~1.4 s/image
+  // on the CPU EP (identical keypoints), evidently due to heavy CPU<->ANE
+  // op-partitioning. The EP is correct (validated by identical output) and the
+  // plumbing is kept for future work (ML Program format, ANE-friendly op
+  // coverage, model caching), but enabling it by default would be a footgun.
+  // ORT 1.25 exposes CoreML only via the C factory, not the string
+  // AppendExecutionProvider API.
+  const char* enable_coreml = std::getenv("COLMAP_ENABLE_COREML");
+  if (enable_coreml != nullptr && enable_coreml[0] == '1') {
+    LOG(WARNING) << "COLMAP_ENABLE_COREML is set: using the experimental CoreML "
+                    "execution provider, which is currently much slower than "
+                    "the CPU EP for these models.";
+    OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_CoreML(
+        session_options_, /*coreml_flags=*/0);
+    if (status != nullptr) {
+      LOG(WARNING) << "CoreML execution provider unavailable ("
+                   << Ort::GetApi().GetErrorMessage(status)
+                   << "); falling back to CPU.";
+      Ort::GetApi().ReleaseStatus(status);
+    }
   }
 #endif
 

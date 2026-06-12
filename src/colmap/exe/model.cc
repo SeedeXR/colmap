@@ -426,16 +426,39 @@ int RunModelAligner(int argc, char** argv) {
 int RunModelAnalyzer(int argc, char** argv) {
   std::filesystem::path path;
   bool verbose = false;
+  std::string format = "text";
 
   OptionManager options;
   options.AddRequiredOption("path", &path);
   options.AddDefaultOption("verbose", &verbose);
+  options.AddDefaultOption("format", &format, "{text, json}");
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
 
   Reconstruction reconstruction;
   reconstruction.Read(path);
+
+  // Machine-readable single-line JSON on stdout for tooling / regression
+  // harnesses (glog text stays on stderr). See memory/process_contract.md §9.
+  if (format == "json") {
+    std::cout << "{"
+              << "\"rigs\":" << reconstruction.NumRigs()
+              << ",\"cameras\":" << reconstruction.NumCameras()
+              << ",\"frames\":" << reconstruction.NumFrames()
+              << ",\"registered_frames\":" << reconstruction.NumRegFrames()
+              << ",\"images\":" << reconstruction.NumImages()
+              << ",\"registered_images\":" << reconstruction.NumRegImages()
+              << ",\"points3D\":" << reconstruction.NumPoints3D()
+              << ",\"observations\":" << reconstruction.ComputeNumObservations()
+              << ",\"mean_track_length\":"
+              << reconstruction.ComputeMeanTrackLength()
+              << ",\"mean_observations_per_image\":"
+              << reconstruction.ComputeMeanObservationsPerRegImage()
+              << ",\"mean_reproj_error_px\":"
+              << reconstruction.ComputeMeanReprojectionError() << "}\n";
+    return EXIT_SUCCESS;
+  }
 
   LOG(INFO) << StringPrintf("Rigs: %d", reconstruction.NumRigs());
   LOG(INFO) << StringPrintf("Cameras: %d", reconstruction.NumCameras());

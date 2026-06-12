@@ -34,6 +34,7 @@
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/scene/database.h"
 #include "colmap/util/file.h"
+#include "colmap/util/progress.h"
 #include "colmap/util/timer.h"
 
 namespace colmap {
@@ -330,12 +331,17 @@ void IncrementalPipeline::Run() {
 
   const size_t num_images = database_cache_->NumImages();
 
+  ProgressReporter::Default().StageStarted("mapper",
+                                           static_cast<int64_t>(num_images));
+
   IncrementalMapper::Options mapper_options = options_->Mapper();
   IncrementalMapper mapper(database_cache_);
   if (Reconstruct(mapper,
                   mapper_options,
                   /*continue_reconstruction=*/continue_reconstruction) ==
       Status::STOP) {
+    ProgressReporter::Default().StageCompleted(
+        "mapper", total_run_timer_->ElapsedSeconds());
     total_run_timer_->PrintMinutes();
     return;
   }
@@ -374,6 +380,8 @@ void IncrementalPipeline::Run() {
     }
   }
 
+  ProgressReporter::Default().StageCompleted(
+      "mapper", total_run_timer_->ElapsedSeconds());
   total_run_timer_->PrintMinutes();
 }
 
@@ -537,6 +545,10 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
         LOG(INFO) << StringPrintf("Registering image #%d (num_reg_frames=%d)",
                                   next_image_id,
                                   reconstruction->NumRegFrames());
+        ProgressReporter::Default().Progress(
+            "mapper",
+            static_cast<int64_t>(reconstruction->NumRegFrames()),
+            static_cast<int64_t>(database_cache_->NumImages()));
         LOG(INFO) << StringPrintf(
             "=> Image sees %d / %d points",
             mapper.ObservationManager().NumVisiblePoints3D(next_image_id),

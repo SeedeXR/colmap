@@ -72,6 +72,32 @@ if(CASPAR_ENABLED)
     endif()
 endif()
 
+# Experimental: Metal compute acceleration for Apple Silicon. Mirrors the CUDA
+# isolation pattern (separate targets, COLMAP_METAL_ENABLED compile definition)
+# so that forthcoming Metal backends (e.g. PatchMatch MVS, descriptor matching)
+# never affect Linux/Windows builds. Only meaningful on Apple platforms; a
+# verified on-device proof-of-concept (unified-memory compute, validated vs CPU)
+# lives in memory/porting.md. Default OFF until a backend lands.
+option(METAL_ENABLED "Whether to enable Metal compute acceleration (Apple only)" OFF)
+if(METAL_ENABLED)
+    if(APPLE)
+        # Metal targets link via the framework flags (verified working on this
+        # SDK; find_library(Metal) is unreliable across CMake/SDK combos). The
+        # canonical link form for a forthcoming colmap_*_metal target is:
+        #   target_link_libraries(<target> "-framework Metal"
+        #                                   "-framework Foundation"
+        #                                   "-framework MetalPerformanceShaders")
+        # and .metal shaders compile to a .metallib via `xcrun metal/metallib`.
+        set(COLMAP_METAL_FRAMEWORKS
+            "-framework Metal" "-framework Foundation"
+            "-framework MetalPerformanceShaders")
+        add_compile_definitions(COLMAP_METAL_ENABLED)
+        message(STATUS "Metal acceleration enabled (Apple Silicon)")
+    else()
+        message(WARNING "METAL_ENABLED is only supported on Apple platforms; ignoring.")
+    endif()
+endif()
+
 # Disables default features, as we specify each required feature manually below.
 list(APPEND VCPKG_MANIFEST_FEATURES "core")
 

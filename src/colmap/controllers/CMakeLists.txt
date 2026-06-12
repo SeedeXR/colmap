@@ -45,6 +45,7 @@ COLMAP_ADD_LIBRARY(
         global_pipeline.h global_pipeline.cc
         image_reader.h image_reader.cc
         incremental_pipeline.h incremental_pipeline.cc
+        mapper_selection.h mapper_selection.cc
         option_manager.h option_manager.cc
         reconstruction_clustering.h reconstruction_clustering.cc
         rotation_averaging.h rotation_averaging.cc
@@ -129,6 +130,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME option_manager_test
     SRCS option_manager_test.cc
+    LINK_LIBS colmap_controllers
+)
+COLMAP_ADD_TEST(
+    NAME mapper_selection_test
+    SRCS mapper_selection_test.cc
     LINK_LIBS colmap_controllers
 )
 COLMAP_ADD_TEST(

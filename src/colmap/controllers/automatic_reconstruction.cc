@@ -34,6 +34,7 @@
 #include "colmap/controllers/global_pipeline.h"
 #include "colmap/controllers/hierarchical_pipeline.h"
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/controllers/mapper_selection.h"
 #include "colmap/controllers/option_manager.h"
 #include "colmap/controllers/undistorters.h"
 #include "colmap/estimators/view_graph_calibration.h"
@@ -316,7 +317,43 @@ void AutomaticReconstructionController::RunSparseMapper() {
 
   std::unique_ptr<BaseController> mapper;
   auto database = Database::Open(*option_manager_.database_path);
-  switch (options_.mapper) {
+
+  // Resolve Mapper::AUTO from cheap database signals (image count + view-graph
+  // density) and the configured data type. See controllers/mapper_selection.h.
+  Mapper effective_mapper = options_.mapper;
+  if (effective_mapper == Mapper::AUTO) {
+    const int num_images = static_cast<int>(database->NumImages());
+    const size_t num_pairs = database->NumVerifiedImagePairs();
+    double density = -1.0;
+    if (num_images >= 2) {
+      const double max_pairs =
+          0.5 * static_cast<double>(num_images) * (num_images - 1);
+      if (max_pairs > 0) {
+        density = static_cast<double>(num_pairs) / max_pairs;
+      }
+    }
+    MapperSelectionStats stats;
+    stats.num_images = num_images;
+    stats.view_graph_density = density;
+    stats.is_video = (options_.data_type == DataType::VIDEO);
+    const MapperRecommendation rec = SelectMapper(stats);
+    LOG(INFO) << "Auto-selected mapper: "
+              << RecommendedMapperToString(rec.mapper) << " (" << rec.rationale
+              << ")";
+    switch (rec.mapper) {
+      case RecommendedMapper::kIncremental:
+        effective_mapper = Mapper::INCREMENTAL;
+        break;
+      case RecommendedMapper::kGlobal:
+        effective_mapper = Mapper::GLOBAL;
+        break;
+      case RecommendedMapper::kHierarchical:
+        effective_mapper = Mapper::HIERARCHICAL;
+        break;
+    }
+  }
+
+  switch (effective_mapper) {
     case Mapper::INCREMENTAL: {
       auto options =
           std::make_shared<IncrementalPipelineOptions>(*option_manager_.mapper);

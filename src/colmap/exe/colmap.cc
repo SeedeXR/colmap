@@ -38,7 +38,13 @@
 #include "colmap/exe/sfm.h"
 #include "colmap/exe/vocab_tree.h"
 #include "colmap/util/oiio_utils.h"
+#include "colmap/util/signal_handler.h"
+#include "colmap/util/sysinfo.h"
 #include "colmap/util/version.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace {
 
@@ -47,6 +53,45 @@ using command_func_t = std::function<int(int, char**)>;
 void ShowVersion() {
   std::cout << colmap::GetVersionInfo() << " (" << colmap::GetBuildInfo()
             << ")\n";
+}
+
+// `colmap system_info [--format json]`: report detected machine resources and
+// build configuration, for tuning and bug reports. See process_contract.md §9.
+int RunSystemInfo(int argc, char** argv) {
+  bool json = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--format" && i + 1 < argc) {
+      json = std::string(argv[i + 1]) == "json";
+    } else if (std::string(argv[i]) == "-h" ||
+               std::string(argv[i]) == "--help") {
+      std::cout << "Usage: colmap system_info [--format {text,json}]\n";
+      return EXIT_SUCCESS;
+    }
+  }
+
+  const colmap::SystemInfo& info = colmap::GetSystemInfo();
+  int omp_max_threads = 1;
+#ifdef _OPENMP
+  omp_max_threads = omp_get_max_threads();
+#endif
+  const int recommended_perf = colmap::GetNumPerformanceCores();
+
+  if (json) {
+    std::string sys = colmap::FormatSystemInfoJson(info);
+    // Splice build/runtime fields into the system-info object.
+    sys.pop_back();  // drop closing '}'
+    std::cout << sys << ",\"openmp_max_threads\":" << omp_max_threads
+              << ",\"recommended_extraction_threads\":" << recommended_perf
+              << ",\"version\":\"" << colmap::GetVersionInfo() << "\"}\n";
+  } else {
+    std::cout << colmap::FormatSystemInfo(info);
+    std::cout << "  OpenMP threads:    " << omp_max_threads << "\n";
+    std::cout << "  Rec. extract thr:  " << recommended_perf
+              << " (performance cores)\n";
+    std::cout << "  Version:           " << colmap::GetVersionInfo() << "\n";
+    std::cout << "  Build:             " << colmap::GetBuildInfo() << "\n";
+  }
+  return EXIT_SUCCESS;
 }
 
 void ShowHelp(
@@ -87,6 +132,10 @@ void ShowHelp(
 int main(int argc, char** argv) {
   colmap::InitializeGlog(argv);
   colmap::EnsureOpenImageIOInitialized();
+  // Install cooperative SIGINT/SIGTERM handlers so long-running commands can
+  // shut down cleanly and save partial results (see util/signal_handler.h and
+  // memory/process_contract.md §8).
+  colmap::InstallInterruptHandlers();
 
   std::vector<std::pair<std::string, command_func_t>> commands;
   commands.emplace_back("gui", &colmap::RunGraphicalUserInterface);
@@ -139,6 +188,7 @@ int main(int argc, char** argv) {
 #endif
   commands.emplace_back("point_filtering", &colmap::RunPointFiltering);
   commands.emplace_back("point_triangulator", &colmap::RunPointTriangulator);
+  commands.emplace_back("mapper_advisor", &colmap::RunMapperAdvisor);
   commands.emplace_back("pose_prior_mapper", &colmap::RunPosePriorMapper);
 #if defined(COLMAP_MVS_ENABLED)
   commands.emplace_back("poisson_mesher", &colmap::RunPoissonMesher);
@@ -148,6 +198,7 @@ int main(int argc, char** argv) {
   commands.emplace_back("rotation_averager", &colmap::RunRotationAverager);
   commands.emplace_back("sequential_matcher", &colmap::RunSequentialMatcher);
   commands.emplace_back("spatial_matcher", &colmap::RunSpatialMatcher);
+  commands.emplace_back("system_info", &RunSystemInfo);
 #if defined(COLMAP_MVS_ENABLED)
   commands.emplace_back("stereo_fusion", &colmap::RunStereoFuser);
 #endif

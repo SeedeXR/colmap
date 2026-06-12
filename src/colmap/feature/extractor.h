@@ -68,6 +68,15 @@ struct FeatureExtractionOptions : public FeatureExtractionTypeOptions {
   // Number of threads for feature extraction.
   int num_threads = -1;
 
+  // Soft upper bound on resident memory (in GiB) for CPU feature extraction.
+  // When > 0 and num_threads is automatic (<= 0), the number of CPU extraction
+  // threads is reduced so the estimated peak working set fits this budget --
+  // useful on memory-constrained machines (e.g. 16 GB laptops) to keep COLMAP
+  // from exhausting RAM and starving other applications. 0 disables the cap
+  // (default), preserving historical behavior on all platforms. Ignored for
+  // GPU extraction.
+  double max_memory_gb = 0.0;
+
   // Whether to use the GPU for feature extraction.
 #ifdef COLMAP_GPU_ENABLED
   bool use_gpu = true;
