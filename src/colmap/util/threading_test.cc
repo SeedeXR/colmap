@@ -30,6 +30,9 @@
 #include "colmap/util/threading.h"
 
 #include "colmap/util/logging.h"
+#include "colmap/util/signal_handler.h"
+
+#include <csignal>
 
 #include <gtest/gtest.h>
 
@@ -970,6 +973,24 @@ TEST(GetEffectiveNumThreads, Nominal) {
   EXPECT_EQ(GetEffectiveNumThreads(1), 1);
   EXPECT_EQ(GetEffectiveNumThreads(2), 2);
   EXPECT_EQ(GetEffectiveNumThreads(3), 3);
+}
+
+TEST(Thread, InterruptRequestStops) {
+  class TestThread : public Thread {
+    void Run() override {}
+  };
+
+  ResetInterruptForTesting();
+  TestThread thread;
+  EXPECT_FALSE(thread.IsStopped());
+  // A process-level interrupt (SIGINT/SIGTERM) is treated as a stop request for
+  // every thread, so cooperative loops that poll IsStopped() (directly or via a
+  // controller's CheckIfStopped predicate) shut down on Ctrl-C. See
+  // util/signal_handler.h.
+  SimulateInterruptForTesting(SIGINT);
+  EXPECT_TRUE(thread.IsStopped());
+  ResetInterruptForTesting();
+  EXPECT_FALSE(thread.IsStopped());
 }
 
 }  // namespace

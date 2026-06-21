@@ -64,9 +64,10 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type) {
 #else  // POSIX.
 
 extern "C" void PosixSignalHandler(int signum) {
-  // Only async-signal-safe work: record the signal. Re-arm so a second
-  // identical signal still terminates via the default disposition if the
-  // cooperative shutdown wedges.
+  // Only async-signal-safe work: record the signal. The handler is installed
+  // with SA_RESETHAND, so it fires exactly once and the disposition reverts to
+  // the default; a second identical signal then terminates the process via the
+  // default disposition if the cooperative shutdown wedges.
   g_interrupt_signal = signum;
 }
 
@@ -81,7 +82,10 @@ void InstallInterruptHandlers() {
   struct sigaction action {};
   action.sa_handler = PosixSignalHandler;
   sigemptyset(&action.sa_mask);
-  action.sa_flags = 0;  // No SA_RESTART: let blocking calls return EINTR.
+  // No SA_RESTART (let blocking calls return EINTR). SA_RESETHAND restores the
+  // default disposition after the first signal, so a second SIGINT/SIGTERM
+  // hard-terminates the process if the cooperative shutdown wedges.
+  action.sa_flags = SA_RESETHAND;
   sigaction(SIGINT, &action, nullptr);
   sigaction(SIGTERM, &action, nullptr);
 #endif

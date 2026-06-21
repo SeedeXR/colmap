@@ -8,25 +8,25 @@
 # an integration test (the whole pipeline must run + register images) and a
 # regression gate (fails if RAM exceeds the cap or quality drops).
 #
-# Methodology (matches memory/agent_profile.md + the on-device profiling):
-#   * start small (2, 4, ... images), grow only while in budget;
-#   * target 4-6 GB RAM, HARD cap 8 GB -- if a stage exceeds the cap the run
+# Methodology (matches memory/testing_mechanism.md + on-device profiling):
+#   * start small (2, 4, 6, 8 images), grow only while in budget;
+#   * IDEAL 3-4 GB RAM, HARD cap 6 GB -- if a stage exceeds the cap the run
 #     FAILS (the "cut and find a more efficient way" rule), it does not silently
-#     continue;
+#     continue. The lower the RAM, the better.
 #   * assert all images register and mean reprojection error stays sub-pixel.
 #
 # Usage:
 #   scripts/macos/pipeline_regression.sh [--bin PATH] [--dataset DIR]
-#                                        [--sizes "2 4 8"] [--max-gb 8]
+#                                        [--sizes "2 4 6 8"] [--max-gb 6]
 # Exit code 0 = all checks passed; non-zero = a budget or quality check failed.
 
 set -u
 
 BIN="${COLMAP_BIN:-build/src/colmap/exe/colmap}"
 DATASET="${COLMAP_DATASET:-datasets/south-building}"
-SIZES="2 4 8"
-MAX_GB="8.0"
-TARGET_GB="6.0"
+SIZES="2 4 6 8"
+MAX_GB="6.0"          # HARD cap; exceeding it FAILS the run.
+TARGET_GB="4.0"       # ideal ceiling (3-4 GB band); lower is better.
 MAX_REPROJ_PX="1.5"   # quality floor: mean reprojection error must be below this
 
 while [[ $# -gt 0 ]]; do
@@ -98,7 +98,10 @@ for N in $SIZES; do
 
   verdict="PASS"
   for g in "$fe_g" "$ma_g" "$mp_g"; do
-    if over "$g" "$MAX_GB"; then verdict="FAIL(RAM ${g}>${MAX_GB})"; FAILED=1; fi
+    if over "$g" "$MAX_GB"; then verdict="FAIL(RAM ${g}>${MAX_GB})"; FAILED=1;
+    elif over "$g" "$TARGET_GB" && [[ "$verdict" == "PASS" ]]; then
+      # In budget but above the 3-4 GB ideal band: pass, but flag it (lower is better).
+      verdict="WARN(RAM ${g}>${TARGET_GB} ideal)"; fi
   done
   if [[ $N -ge 4 ]]; then
     [[ "$reg" != "$N" ]] && { verdict="FAIL(reg $reg/$N)"; FAILED=1; }

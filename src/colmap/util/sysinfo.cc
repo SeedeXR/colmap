@@ -29,6 +29,8 @@
 
 #include "colmap/util/sysinfo.h"
 
+#include "colmap/util/string.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -91,17 +93,20 @@ std::string SysctlString(const char* name) {
 }
 
 uint64_t AppleAvailableMemoryBytes() {
-  mach_port_t host = mach_host_self();
+  // mach_host_self() returns a send right that the caller owns and must release
+  // with mach_port_deallocate, otherwise every call leaks a port reference.
+  const mach_port_t host = mach_host_self();
   vm_size_t page_size = 0;
-  if (host_page_size(host, &page_size) != KERN_SUCCESS) {
-    return 0;
-  }
   vm_statistics64_data_t vm_stats{};
   mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-  if (host_statistics64(host,
+  const bool ok =
+      host_page_size(host, &page_size) == KERN_SUCCESS &&
+      host_statistics64(host,
                         HOST_VM_INFO64,
                         reinterpret_cast<host_info64_t>(&vm_stats),
-                        &count) != KERN_SUCCESS) {
+                        &count) == KERN_SUCCESS;
+  mach_port_deallocate(mach_task_self(), host);
+  if (!ok) {
     return 0;
   }
   // Memory the OS can hand out without swapping: truly free pages plus pages
@@ -298,22 +303,6 @@ SystemInfo DetectSystemInfo() {
     info.os_name = "Unknown";
   }
   return info;
-}
-
-std::string JsonEscape(const std::string& str) {
-  std::string out;
-  out.reserve(str.size() + 2);
-  for (const char c : str) {
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\t': out += "\\t"; break;
-      case '\r': out += "\\r"; break;
-      default: out += c; break;
-    }
-  }
-  return out;
 }
 
 }  // namespace

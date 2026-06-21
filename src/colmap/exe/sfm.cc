@@ -45,6 +45,7 @@
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/string.h"
 #include "colmap/util/opengl_utils.h"
 
 #include <boost/property_tree/json_parser.hpp>
@@ -409,14 +410,7 @@ int RunMapperAdvisor(int argc, char** argv) {
   auto database = Database::Open(*options.database_path);
   const int num_images = static_cast<int>(database->NumImages());
   const size_t num_pairs = database->NumVerifiedImagePairs();
-  double density = -1.0;
-  if (num_images >= 2) {
-    const double max_pairs =
-        0.5 * static_cast<double>(num_images) * (num_images - 1);
-    if (max_pairs > 0) {
-      density = static_cast<double>(num_pairs) / max_pairs;
-    }
-  }
+  const double density = ComputeViewGraphDensity(num_images, num_pairs);
 
   MapperSelectionStats stats;
   stats.num_images = num_images;
@@ -431,7 +425,7 @@ int RunMapperAdvisor(int argc, char** argv) {
               << ",\"verified_image_pairs\":" << num_pairs
               << ",\"view_graph_density\":" << density
               << ",\"is_video\":" << (is_video ? "true" : "false")
-              << ",\"rationale\":\"" << rec.rationale << "\"}\n";
+              << ",\"rationale\":\"" << JsonEscape(rec.rationale) << "\"}\n";
   } else {
     std::cout << "Mapper recommendation: "
               << RecommendedMapperToString(rec.mapper) << "\n";

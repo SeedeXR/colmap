@@ -29,9 +29,16 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 namespace colmap {
+
+// View-graph density = fraction of the C(num_images, 2) possible image pairs
+// that have a verified two-view geometry, in [0, 1]. Returns -1 (unknown) when
+// there are fewer than two images. Shared by the automatic reconstructor and
+// the `mapper_advisor` CLI so both feed SelectMapper an identical signal.
+double ComputeViewGraphDensity(int num_images, size_t num_verified_pairs);
 
 // Which SfM mapper to run. Mirrors the AutomaticReconstructionController Mapper
 // enum (INCREMENTAL | GLOBAL | HIERARCHICAL) without depending on it.

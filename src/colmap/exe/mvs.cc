@@ -36,6 +36,7 @@
 #include "colmap/mvs/mesh_simplification.h"
 #include "colmap/mvs/model.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_metal.h"
 #include "colmap/mvs/patch_match_options.h"
 #include "colmap/mvs/poisson_meshing.h"
 #include "colmap/mvs/texture_mapping.h"
@@ -257,10 +258,7 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                              const std::string& pmvs_option_name,
                              const mvs::PatchMatchOptions& options,
                              const std::filesystem::path& config_path) {
-#if !defined(COLMAP_CUDA_ENABLED)
-  LOG(FATAL_THROW) << "Dense stereo reconstruction requires CUDA, which is not "
-                      "available on your system.";
-#else   // COLMAP_CUDA_ENABLED
+#if defined(COLMAP_CUDA_ENABLED)
   std::string workspace_format_lower = workspace_format;
   StringToLower(&workspace_format_lower);
   THROW_CHECK(workspace_format_lower == "colmap" ||
@@ -275,7 +273,32 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                                        config_path);
 
   controller.Run();
-#endif  // COLMAP_CUDA_ENABLED
+#elif defined(COLMAP_METAL_ENABLED)
+  // macOS Metal backend (no CUDA): see mvs/patch_match_metal_controller.cc.
+  std::string workspace_format_lower = workspace_format;
+  StringToLower(&workspace_format_lower);
+  THROW_CHECK(workspace_format_lower == "colmap")
+      << "The Metal patch-match backend supports `workspace_format` COLMAP "
+         "only (got '"
+      << workspace_format_lower << "').";
+  // The Metal backend selects source views automatically (top-overlapping, like
+  // the CUDA path's __auto__ default). Warn rather than silently ignore the
+  // CUDA-only inputs so the user knows they have no effect here.
+  if (!config_path.empty()) {
+    LOG(WARNING) << "The Metal patch-match backend does not yet read a "
+                    "config_path; ignoring '"
+                 << config_path.string()
+                 << "' and auto-selecting source views for all images.";
+  }
+  if (!pmvs_option_name.empty() && pmvs_option_name != "option-all") {
+    LOG(WARNING) << "The Metal patch-match backend ignores `pmvs_option_name` ('"
+                 << pmvs_option_name << "').";
+  }
+  mvs::RunPatchMatchStereoMetal(options, workspace_path, workspace_format_lower);
+#else
+  LOG(FATAL_THROW) << "Dense stereo reconstruction requires CUDA or Metal, "
+                      "neither of which is available on your system.";
+#endif
 }
 
 int RunPoissonMesher(int argc, char** argv) {

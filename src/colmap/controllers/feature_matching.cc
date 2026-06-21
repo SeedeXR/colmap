@@ -213,6 +213,11 @@ class FeatureMatcherThread : public Thread {
 
     while (!pair_generator->HasFinished()) {
       if (IsStopped()) {
+        // Close the stage even on interrupt so orchestrators consuming the
+        // jsonl process contract never see a "matching" stage that started but
+        // never completed. See memory/process_contract.md.
+        ProgressReporter::Default().StageCompleted("matching",
+                                                   run_timer.ElapsedSeconds());
         run_timer.PrintMinutes();
         return;
       }

@@ -70,6 +70,11 @@ void StringToUpper(std::string* str);
 // Check whether the sub-string is contained in the given string.
 bool StringContains(const std::string& str, const std::string& sub_str);
 
+// Escape a string so it can be embedded inside a JSON string literal (escapes
+// ", \, and the C0 control characters \n, \t, \r). Shared by the structured
+// progress channel (util/progress) and the system_info/advisor JSON output.
+std::string JsonEscape(const std::string& str);
+
 // Convert a string from the platform's default encoding to UTF-8.
 // On Windows: converts from ANSI code page (ACP) to UTF-8.
 // On POSIX: assumes the input is already UTF-8 and returns it unchanged.

@@ -33,6 +33,18 @@
 
 namespace colmap {
 
+double ComputeViewGraphDensity(int num_images, size_t num_verified_pairs) {
+  if (num_images < 2) {
+    return -1.0;
+  }
+  const double max_pairs =
+      0.5 * static_cast<double>(num_images) * (num_images - 1);
+  if (max_pairs <= 0) {
+    return -1.0;
+  }
+  return static_cast<double>(num_verified_pairs) / max_pairs;
+}
+
 const char* RecommendedMapperToString(RecommendedMapper mapper) {
   switch (mapper) {
     case RecommendedMapper::kIncremental: return "incremental";

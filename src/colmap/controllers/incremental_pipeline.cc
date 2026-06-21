@@ -331,8 +331,10 @@ void IncrementalPipeline::Run() {
 
   const size_t num_images = database_cache_->NumImages();
 
-  ProgressReporter::Default().StageStarted("mapper",
-                                           static_cast<int64_t>(num_images));
+  if (emit_progress_stage_) {
+    ProgressReporter::Default().StageStarted(
+        "mapper", static_cast<int64_t>(num_images));
+  }
 
   IncrementalMapper::Options mapper_options = options_->Mapper();
   IncrementalMapper mapper(database_cache_);
@@ -340,8 +342,10 @@ void IncrementalPipeline::Run() {
                   mapper_options,
                   /*continue_reconstruction=*/continue_reconstruction) ==
       Status::STOP) {
-    ProgressReporter::Default().StageCompleted(
-        "mapper", total_run_timer_->ElapsedSeconds());
+    if (emit_progress_stage_) {
+      ProgressReporter::Default().StageCompleted(
+          "mapper", total_run_timer_->ElapsedSeconds());
+    }
     total_run_timer_->PrintMinutes();
     return;
   }
@@ -380,8 +384,10 @@ void IncrementalPipeline::Run() {
     }
   }
 
-  ProgressReporter::Default().StageCompleted(
-      "mapper", total_run_timer_->ElapsedSeconds());
+  if (emit_progress_stage_) {
+    ProgressReporter::Default().StageCompleted(
+        "mapper", total_run_timer_->ElapsedSeconds());
+  }
   total_run_timer_->PrintMinutes();
 }
 

@@ -320,18 +320,12 @@ void AutomaticReconstructionController::RunSparseMapper() {
 
   // Resolve Mapper::AUTO from cheap database signals (image count + view-graph
   // density) and the configured data type. See controllers/mapper_selection.h.
-  Mapper effective_mapper = options_.mapper;
+  const Mapper requested_mapper = options_.mapper;
+  Mapper effective_mapper = requested_mapper;
   if (effective_mapper == Mapper::AUTO) {
     const int num_images = static_cast<int>(database->NumImages());
     const size_t num_pairs = database->NumVerifiedImagePairs();
-    double density = -1.0;
-    if (num_images >= 2) {
-      const double max_pairs =
-          0.5 * static_cast<double>(num_images) * (num_images - 1);
-      if (max_pairs > 0) {
-        density = static_cast<double>(num_pairs) / max_pairs;
-      }
-    }
+    const double density = ComputeViewGraphDensity(num_images, num_pairs);
     MapperSelectionStats stats;
     stats.num_images = num_images;
     stats.view_graph_density = density;
@@ -390,6 +384,26 @@ void AutomaticReconstructionController::RunSparseMapper() {
 
   mapper->SetCheckIfStoppedFunc([&]() { return IsStopped(); });
   mapper->Run();
+
+  // Safety net: when AUTO routed to the global mapper using the (uncalibrated)
+  // connectivity heuristic and it produced no reconstruction, fall back to the
+  // robust incremental mapper before giving up. Only do this for AUTO -- an
+  // explicit `--mapper global` request is respected as-is.
+  if (requested_mapper == Mapper::AUTO &&
+      effective_mapper == Mapper::GLOBAL &&
+      reconstruction_manager_->Size() == 0 && !IsStopped()) {
+    LOG(WARNING) << "Auto-selected global mapper produced no reconstruction; "
+                    "falling back to the incremental mapper.";
+    auto fallback_options =
+        std::make_shared<IncrementalPipelineOptions>(*option_manager_.mapper);
+    fallback_options->image_path = *option_manager_.image_path;
+    auto fallback = std::make_unique<IncrementalPipeline>(
+        std::move(fallback_options),
+        Database::Open(*option_manager_.database_path),
+        reconstruction_manager_);
+    fallback->SetCheckIfStoppedFunc([&]() { return IsStopped(); });
+    fallback->Run();
+  }
 
   CreateDirIfNotExists(sparse_path);
   reconstruction_manager_->Write(sparse_path);

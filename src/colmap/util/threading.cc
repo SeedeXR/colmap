@@ -30,6 +30,7 @@
 #include "colmap/util/threading.h"
 
 #include "colmap/util/logging.h"
+#include "colmap/util/signal_handler.h"
 
 namespace colmap {
 
@@ -94,7 +95,12 @@ bool Thread::IsStarted() {
 
 bool Thread::IsStopped() {
   std::unique_lock<std::mutex> lock(mutex_);
-  return stopped_;
+  // A process-level interrupt (SIGINT/SIGTERM) is treated as a stop request for
+  // every running thread, so cooperative loops that already poll IsStopped()
+  // (directly or via a controller's CheckIfStopped predicate) shut down cleanly
+  // on Ctrl-C without each call site having to know about signals. See
+  // util/signal_handler.h.
+  return stopped_ || IsInterruptRequested();
 }
 
 bool Thread::IsPaused() {

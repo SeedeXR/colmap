@@ -83,5 +83,17 @@ TEST(SelectMapper, RationaleIsPopulated) {
   EXPECT_FALSE(SelectMapper(stats).rationale.empty());
 }
 
+TEST(ComputeViewGraphDensity, Nominal) {
+  // Fewer than two images -> unknown.
+  EXPECT_LT(ComputeViewGraphDensity(0, 0), 0.0);
+  EXPECT_LT(ComputeViewGraphDensity(1, 0), 0.0);
+  // Fully connected: C(4,2) = 6 possible pairs, 6 verified -> density 1.0.
+  EXPECT_DOUBLE_EQ(ComputeViewGraphDensity(4, 6), 1.0);
+  // Half connected.
+  EXPECT_DOUBLE_EQ(ComputeViewGraphDensity(4, 3), 0.5);
+  // No verified pairs -> 0.0 (known, not unknown).
+  EXPECT_DOUBLE_EQ(ComputeViewGraphDensity(10, 0), 0.0);
+}
+
 }  // namespace
 }  // namespace colmap

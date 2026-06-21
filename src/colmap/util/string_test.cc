@@ -227,6 +227,16 @@ TEST(StringContains, Nominal) {
   EXPECT_FALSE(StringContains("ab", "c"));
 }
 
+TEST(JsonEscape, Nominal) {
+  EXPECT_EQ(JsonEscape(""), "");
+  EXPECT_EQ(JsonEscape("plain"), "plain");
+  EXPECT_EQ(JsonEscape("a\"b"), "a\\\"b");
+  EXPECT_EQ(JsonEscape("a\\b"), "a\\\\b");
+  EXPECT_EQ(JsonEscape("line1\nline2"), "line1\\nline2");
+  EXPECT_EQ(JsonEscape("col1\tcol2"), "col1\\tcol2");
+  EXPECT_EQ(JsonEscape("cr\r"), "cr\\r");
+}
+
 TEST(ConversionBetweenPlatformAndUTF8, NonASCIIStringRoundtrip) {
   const std::unordered_map<int, std::string> kCodePageToUTF8Strings = {
       {// English

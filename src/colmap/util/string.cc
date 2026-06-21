@@ -32,6 +32,7 @@
 #include "colmap/util/logging.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <locale>
 #include <sstream>
@@ -275,15 +276,35 @@ void StringTrim(std::string* str) {
 }
 
 void StringToLower(std::string* str) {
-  std::transform(str->begin(), str->end(), str->begin(), ::tolower);
+  std::transform(str->begin(), str->end(), str->begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
 }
 
 void StringToUpper(std::string* str) {
-  std::transform(str->begin(), str->end(), str->begin(), ::toupper);
+  std::transform(str->begin(), str->end(), str->begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
 }
 
 bool StringContains(const std::string& str, const std::string& sub_str) {
   return str.find(sub_str) != std::string::npos;
+}
+
+std::string JsonEscape(const std::string& str) {
+  std::string out;
+  out.reserve(str.size() + 2);
+  for (const char c : str) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\t': out += "\\t"; break;
+      case '\r': out += "\\r"; break;
+      default: out += c; break;
+    }
+  }
+  return out;
 }
 
 std::string PlatformToUTF8(const std::string& str) {

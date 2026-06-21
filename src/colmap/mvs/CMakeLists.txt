@@ -44,6 +44,7 @@ COLMAP_ADD_LIBRARY(
         model.h model.cc
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
+        patch_match_metal.h
         patch_match_options.h patch_match_options.cc
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
@@ -64,10 +65,29 @@ if(OPENMP_FOUND)
     target_link_libraries(colmap_mvs PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# Metal PatchMatch MVS compute core (Apple only). The real Objective-C++
+# implementation compiles under METAL_ENABLED; otherwise a stub reports the
+# backend as unavailable so callers use the CPU/CUDA path. Mirrors the
+# feature/sift_matcher_metal gating exactly.
+if(METAL_ENABLED AND APPLE)
+    target_sources(colmap_mvs PRIVATE patch_match_metal.mm
+                                      patch_match_metal_controller.cc)
+    set_source_files_properties(patch_match_metal.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(colmap_mvs PRIVATE ${COLMAP_METAL_FRAMEWORKS})
+else()
+    target_sources(colmap_mvs PRIVATE patch_match_metal_stub.cc)
+endif()
+
 COLMAP_ADD_TEST(
     NAME consistency_graph_test
     SRCS consistency_graph_test.cc
     LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME patch_match_metal_test
+    SRCS patch_match_metal_test.cc
+    LINK_LIBS colmap_mvs Eigen3::Eigen
 )
 COLMAP_ADD_TEST(
     NAME depth_map_test

@@ -33,6 +33,7 @@
 #include "colmap/scene/scene_clustering.h"
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/progress.h"
 #include "colmap/util/threading.h"
 #include "colmap/util/timer.h"
 
@@ -230,6 +231,10 @@ void HierarchicalPipeline::Run() {
         IncrementalPipeline mapper(std::move(incremental_options),
                                    std::move(cluster_database_cache),
                                    std::move(reconstruction_manager));
+        // Workers run concurrently; the enclosing "mapper" stage is emitted once
+        // by this pipeline (below) rather than per cluster, to preserve the
+        // one-start/one-complete jsonl lifecycle. See process_contract.md.
+        mapper.SetEmitProgressStage(false);
         mapper.Run();
       };
 
@@ -249,6 +254,11 @@ void HierarchicalPipeline::Run() {
       reconstruction_managers;
   reconstruction_managers.reserve(leaf_clusters.size());
 
+  Timer mapper_timer;
+  mapper_timer.Start();
+  ProgressReporter::Default().StageStarted(
+      "mapper", static_cast<int64_t>(total_num_images));
+
   ThreadPool thread_pool(num_eff_workers);
   for (const auto& cluster : leaf_clusters) {
     reconstruction_managers[cluster] =
@@ -256,7 +266,18 @@ void HierarchicalPipeline::Run() {
     thread_pool.AddTask(
         ReconstructCluster, *cluster, reconstruction_managers[cluster]);
   }
-  thread_pool.Wait();
+  // Wait() rethrows worker exceptions; always close the "mapper" stage so the
+  // jsonl process contract never leaves a stage started-but-never-completed.
+  try {
+    thread_pool.Wait();
+  } catch (...) {
+    ProgressReporter::Default().StageCompleted("mapper",
+                                               mapper_timer.ElapsedSeconds());
+    throw;
+  }
+
+  ProgressReporter::Default().StageCompleted("mapper",
+                                             mapper_timer.ElapsedSeconds());
 
   //////////////////////////////////////////////////////////////////////////////
   // Merge clusters

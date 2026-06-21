@@ -130,5 +130,32 @@ TEST(ProgressReporter, JsonEscaping) {
   EXPECT_THAT(out, HasSubstr("\\n"));
 }
 
+TEST(ProgressReporter, ProgressEveryThrottles) {
+  const std::string out = CaptureEmit(ProgressFormat::kPlain, [](auto& r) {
+    r.SetProgressEvery(10);
+    for (int64_t item = 1; item <= 25; ++item) {
+      r.Progress("feature_extraction", item, /*total=*/25);
+    }
+    r.SetProgressEvery(0);  // Restore default for other tests (global singleton).
+  });
+  // Only every 10th item (10, 20) plus the final item (25) is emitted.
+  EXPECT_THAT(out, HasSubstr("item=10/25"));
+  EXPECT_THAT(out, HasSubstr("item=20/25"));
+  EXPECT_THAT(out, HasSubstr("item=25/25"));
+  EXPECT_THAT(out, Not(HasSubstr("item=1/25")));
+  EXPECT_THAT(out, Not(HasSubstr("item=11/25")));
+}
+
+TEST(ProgressReporter, ProgressEveryZeroEmitsEveryItem) {
+  const std::string out = CaptureEmit(ProgressFormat::kPlain, [](auto& r) {
+    for (int64_t item = 1; item <= 3; ++item) {
+      r.Progress("matching", item, /*total=*/3);
+    }
+  });
+  EXPECT_THAT(out, HasSubstr("item=1/3"));
+  EXPECT_THAT(out, HasSubstr("item=2/3"));
+  EXPECT_THAT(out, HasSubstr("item=3/3"));
+}
+
 }  // namespace
 }  // namespace colmap

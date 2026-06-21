@@ -238,6 +238,14 @@ class IncrementalPipeline : public BaseController {
 
   void Run() override;
 
+  // Controls whether Run() emits "mapper" stage_started/stage_completed events
+  // on the process-global ProgressReporter. Defaults to true (standalone use).
+  // HierarchicalPipeline runs many IncrementalPipeline instances concurrently
+  // and emits a single enclosing "mapper" stage itself, so it disables these
+  // per-cluster events to keep the one-start/one-complete jsonl lifecycle
+  // intact. See memory/process_contract.md.
+  void SetEmitProgressStage(bool emit) { emit_progress_stage_ = emit; }
+
   // Getter functions for python pipelines.
   std::shared_ptr<const IncrementalPipelineOptions> Options() const {
     return options_;
@@ -280,6 +288,7 @@ class IncrementalPipeline : public BaseController {
   std::shared_ptr<class ReconstructionManager> reconstruction_manager_;
   std::shared_ptr<class DatabaseCache> database_cache_;
   std::shared_ptr<Timer> total_run_timer_;
+  bool emit_progress_stage_ = true;
 };
 
 }  // namespace colmap

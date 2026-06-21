@@ -39,6 +39,7 @@
 #include "colmap/exe/vocab_tree.h"
 #include "colmap/util/oiio_utils.h"
 #include "colmap/util/signal_handler.h"
+#include "colmap/util/string.h"
 #include "colmap/util/sysinfo.h"
 #include "colmap/util/version.h"
 
@@ -78,11 +79,20 @@ int RunSystemInfo(int argc, char** argv) {
 
   if (json) {
     std::string sys = colmap::FormatSystemInfoJson(info);
-    // Splice build/runtime fields into the system-info object.
-    sys.pop_back();  // drop closing '}'
-    std::cout << sys << ",\"openmp_max_threads\":" << omp_max_threads
-              << ",\"recommended_extraction_threads\":" << recommended_perf
-              << ",\"version\":\"" << colmap::GetVersionInfo() << "\"}\n";
+    // Splice build/runtime fields in before the closing brace. Locating the
+    // last '}' (rather than blindly dropping the final char) is robust to any
+    // trailing whitespace/newline FormatSystemInfoJson might emit.
+    const std::string extra = colmap::StringPrintf(
+        ",\"openmp_max_threads\":%d,\"recommended_extraction_threads\":%d,"
+        "\"version\":\"%s\"",
+        omp_max_threads,
+        recommended_perf,
+        colmap::JsonEscape(colmap::GetVersionInfo()).c_str());
+    const size_t brace = sys.find_last_of('}');
+    if (brace != std::string::npos) {
+      sys.insert(brace, extra);
+    }
+    std::cout << sys << "\n";
   } else {
     std::cout << colmap::FormatSystemInfo(info);
     std::cout << "  OpenMP threads:    " << omp_max_threads << "\n";

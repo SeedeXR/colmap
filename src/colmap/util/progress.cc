@@ -29,6 +29,8 @@
 
 #include "colmap/util/progress.h"
 
+#include "colmap/util/string.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -37,29 +39,6 @@
 
 namespace colmap {
 namespace {
-
-std::string ToLower(std::string str) {
-  for (char& c : str) {
-    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-  }
-  return str;
-}
-
-std::string JsonEscape(const std::string& str) {
-  std::string out;
-  out.reserve(str.size() + 2);
-  for (const char c : str) {
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\t': out += "\\t"; break;
-      case '\r': out += "\\r"; break;
-      default: out += c; break;
-    }
-  }
-  return out;
-}
 
 // Formats a numeric value for JSON: integers without a fractional part, other
 // values with up to 6 significant digits and no trailing-zero noise.
@@ -90,7 +69,8 @@ std::string JsonArray(const std::vector<std::string>& items) {
 }  // namespace
 
 bool ParseProgressFormat(const std::string& str, ProgressFormat* format) {
-  const std::string lower = ToLower(str);
+  std::string lower = str;
+  StringToLower(&lower);
   if (lower == "none" || lower.empty()) {
     *format = ProgressFormat::kNone;
   } else if (lower == "plain") {
@@ -171,6 +151,13 @@ void ProgressReporter::Progress(const std::string& stage,
                                 double ms_per_item) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (format_ == ProgressFormat::kNone) return;
+  // Optional throttle: when a cadence is configured, only emit every Nth item
+  // (plus the final item) to avoid a locked, flushed stdout write per item on
+  // large datasets. progress_every_ <= 0 keeps the per-item behavior.
+  if (progress_every_ > 0 && item > 0 && item != total &&
+      item % progress_every_ != 0) {
+    return;
+  }
   std::ostringstream ss;
   if (format_ == ProgressFormat::kJsonl) {
     ss << "{\"type\":\"progress\",\"stage\":\"" << JsonEscape(stage) << "\""
