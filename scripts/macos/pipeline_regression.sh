@@ -2,8 +2,10 @@
 # COLMAP macOS sparse-pipeline integration + regression test.
 #
 # Runs the optimized mac production pipeline (resource-aware CPU SIFT extraction
-# with first_octave=0 + a RAM budget, Metal GPU matching via use_gpu, then the
-# incremental mapper) at INCREMENTALLY larger image counts, measuring peak RSS
+# with first_octave=0 + a RAM budget, CPU feature matching -- faster than the
+# (removed) Metal matcher on Apple Silicon, see memory/future_enhancements.md B
+# -- then the incremental mapper) at INCREMENTALLY larger image counts,
+# measuring peak RSS
 # per stage and asserting both a RESOURCE budget and QUALITY floors. It is both
 # an integration test (the whole pipeline must run + register images) and a
 # regression gate (fails if RAM exceeds the cap or quality drops).
@@ -48,12 +50,9 @@ DATASET="$(cd "$DATASET" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-ts() { python3 -c 'import time;print(time.time())'; }
-rss_gb() { # bytes from /usr/bin/time -l "maximum resident set size" -> GiB
-  local b; b=$(grep "maximum resident" "$1" 2>/dev/null | awk '{print $1}')
-  [[ -z "$b" ]] && { echo "0"; return; }
-  echo "scale=2; $b/1073741824" | bc
-}
+# Shared metric helpers (rss_gb, real_s, strip_ansi, model_reg, model_reproj).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_metrics_lib.sh"
+
 over() { # $1 value, $2 limit -> 0 (true) if value > limit
   [[ $(echo "$1 > $2" | bc) -eq 1 ]]
 }
@@ -71,11 +70,11 @@ for N in $SIZES; do
   /usr/bin/time -l "$BIN" feature_extractor --database_path "$W/db.db" --image_path "$W/images" \
     --FeatureExtraction.use_gpu 0 --SiftExtraction.first_octave 0 \
     --FeatureExtraction.max_memory_gb "$TARGET_GB" >"$W/feat.out" 2>"$W/feat.time"
-  fe_t=$(grep " real" "$W/feat.time" | awk '{print $1}'); fe_g=$(rss_gb "$W/feat.time")
+  fe_t=$(real_s "$W/feat.time"); fe_g=$(rss_gb "$W/feat.time")
 
   /usr/bin/time -l "$BIN" exhaustive_matcher --database_path "$W/db.db" \
-    --FeatureMatching.use_gpu 1 >"$W/match.out" 2>"$W/match.time"
-  ma_t=$(grep " real" "$W/match.time" | awk '{print $1}'); ma_g=$(rss_gb "$W/match.time")
+    --FeatureMatching.use_gpu 0 >"$W/match.out" 2>"$W/match.time"
+  ma_t=$(real_s "$W/match.time"); ma_g=$(rss_gb "$W/match.time")
 
   # Incremental SfM needs >= 4 images to reliably initialize+register; for
   # smaller loads we profile extraction+matching resource usage only.
@@ -84,12 +83,12 @@ for N in $SIZES; do
     /usr/bin/time -l "$BIN" mapper --database_path "$W/db.db" --image_path "$W/images" \
       --output_path "$W/sparse" >"$W/map.out" 2>"$W/map.time"
     # Strip ANSI color codes glog may emit, then parse.
-    sed $'s/\x1b\\[[0-9;]*m//g' "$W/map.time" > "$W/map.clean"
-    mp_t=$(grep " real" "$W/map.clean" | awk '{print $1}'); mp_g=$(rss_gb "$W/map.clean")
+    strip_ansi "$W/map.time" > "$W/map.clean"
+    mp_t=$(real_s "$W/map.clean"); mp_g=$(rss_gb "$W/map.clean")
     if [[ -d "$W/sparse/0" ]]; then
       "$BIN" model_analyzer --path "$W/sparse/0" >"$W/an.out" 2>&1
-      reg=$(grep -i "Registered images" "$W/an.out" | awk '{print $NF}')
-      reproj=$(grep -i "Mean reprojection error" "$W/an.out" | awk '{print $NF}' | tr -d 'px')
+      reg=$(model_reg "$W/an.out")
+      reproj=$(model_reproj "$W/an.out")
       [[ -z "$reg" ]] && reg=0
     else
       reg=0

@@ -361,6 +361,40 @@ inline float SampleDepth(device const float* dmap, int W, int H, float x,
   return dmap[(uint)r * W + c];
 }
 
+// Forward-backward reprojection error of a reference-frame point (px,py,pz) at
+// reference pixel (col,row) against ONE source view (projection P, inverse iP,
+// depth map src_depth). Returns the pixel reprojection error, or a negative
+// sentinel if the reprojection is degenerate (point at/behind the source
+// camera, or no source depth at the reprojection). Shared by both geometric-
+// consistency kernels below so the math stays a single verbatim port of
+// ComputeGeomConsistencyCost (patch_match_cuda.cu).
+inline float GeomReprojErrorDev(constant GeomParams& p,
+                                device const float* P,
+                                device const float* iP,
+                                device const float* src_depth,
+                                float px, float py, float pz,
+                                int col, int row) {
+  const float fz = P[8] * px + P[9] * py + P[10] * pz + P[11];
+  if (!(fz > 1e-6f) || !isfinite(fz)) return -1.0f;  // at/behind source camera.
+  const float inv_fz = 1.0f / fz;
+  float sc = inv_fz * (P[0] * px + P[1] * py + P[2] * pz + P[3]);
+  float sr = inv_fz * (P[4] * px + P[5] * py + P[6] * pz + P[7]);
+  const float sd = SampleDepth(src_depth, p.width, p.height, sc, sr);
+  if (sd == 0.0f) return -1.0f;  // no source depth at the reprojection.
+  sc *= sd;
+  sr *= sd;
+  const float bx = iP[0] * sc + iP[1] * sr + iP[2] * sd + iP[3];
+  const float by = iP[4] * sc + iP[5] * sr + iP[6] * sd + iP[7];
+  const float bz = iP[8] * sc + iP[9] * sr + iP[10] * sd + iP[11];
+  if (!(bz > 1e-6f) || !isfinite(bz)) return -1.0f;  // back-projection degenerate.
+  const float inv_bz = 1.0f / bz;
+  const float bcol = inv_bz * (p.ref_K[0] * bx + p.ref_K[1] * bz);
+  const float brow = inv_bz * (p.ref_K[2] * by + p.ref_K[3] * bz);
+  const float dcol = col - bcol;
+  const float drow = row - brow;
+  return sqrt(dcol * dcol + drow * drow);
+}
+
 // Geometric-consistency cost: forward-backward reprojection error of the depth
 // hypothesis against the source views' depth maps. Verbatim port of
 // ComputeGeomConsistencyCost (patch_match_cuda.cu), averaged over sources.
@@ -385,38 +419,49 @@ kernel void geom_consistency_cost(constant GeomParams& p       [[buffer(0)]],
   const size_t plane = (size_t)p.width * p.height;
   float total = 0.0f;
   for (int m = 0; m < p.num_src; ++m) {
-    device const float* P = src_P + m * 12;
-    device const float* iP = src_inv_P + m * 12;
-    const float fz = P[8] * px + P[9] * py + P[10] * pz + P[11];
-    if (!(fz > 1e-6f) || !isfinite(fz)) {  // point at/behind the source camera.
-      total += p.max_cost;
-      continue;
-    }
-    const float inv_fz = 1.0f / fz;
-    float sc = inv_fz * (P[0] * px + P[1] * py + P[2] * pz + P[3]);
-    float sr = inv_fz * (P[4] * px + P[5] * py + P[6] * pz + P[7]);
-    const float sd = SampleDepth(src_depths + m * plane, p.width, p.height, sc, sr);
-    if (sd == 0.0f) {
-      total += p.max_cost;
-      continue;
-    }
-    sc *= sd;
-    sr *= sd;
-    const float bx = iP[0] * sc + iP[1] * sr + iP[2] * sd + iP[3];
-    const float by = iP[4] * sc + iP[5] * sr + iP[6] * sd + iP[7];
-    const float bz = iP[8] * sc + iP[9] * sr + iP[10] * sd + iP[11];
-    if (!(bz > 1e-6f) || !isfinite(bz)) {  // back-projection degenerate.
-      total += p.max_cost;
-      continue;
-    }
-    const float inv_bz = 1.0f / bz;
-    const float bcol = inv_bz * (p.ref_K[0] * bx + p.ref_K[1] * bz);
-    const float brow = inv_bz * (p.ref_K[2] * by + p.ref_K[3] * bz);
-    const float dcol = col - bcol;
-    const float drow = row - brow;
-    total += min(p.max_cost, sqrt(dcol * dcol + drow * drow));
+    const float err = GeomReprojErrorDev(p, src_P + m * 12, src_inv_P + m * 12,
+                                         src_depths + m * plane, px, py, pz,
+                                         col, row);
+    // Degenerate reprojections and large errors are truncated at max_cost.
+    total += (err < 0.0f) ? p.max_cost : min(p.max_cost, err);
   }
   out_cost[gid] = total / (float)max(p.num_src, 1);
+}
+
+// Fused geometric-consistency count: like geom_consistency_cost but evaluates
+// ALL source views in one dispatch and outputs, per pixel, the number of
+// sources whose forward-backward reprojection error is <= max_cost (the
+// consistency threshold). This lets the controller apply COLMAP's count-based
+// filter with a single dispatch and a single contiguous source-depth upload
+// instead of one dispatch per source. A degenerate reprojection (point behind
+// a camera, missing source depth) simply does not count toward consistency.
+kernel void geom_consistency_count(constant GeomParams& p       [[buffer(0)]],
+                                  device const float* src_P      [[buffer(1)]],
+                                  device const float* src_inv_P  [[buffer(2)]],
+                                  device const float* src_depths [[buffer(3)]],
+                                  device const int* rows         [[buffer(4)]],
+                                  device const int* cols         [[buffer(5)]],
+                                  device const float* depths     [[buffer(6)]],
+                                  device int* out_count          [[buffer(7)]],
+                                  uint gid [[thread_position_in_grid]]) {
+  if (gid >= p.num) return;
+  const int col = cols[gid];
+  const int row = rows[gid];
+  const float depth = depths[gid];
+  const float px = depth * (p.ref_inv_K[0] * col + p.ref_inv_K[1]);
+  const float py = depth * (p.ref_inv_K[2] * row + p.ref_inv_K[3]);
+  const float pz = depth;
+
+  const size_t plane = (size_t)p.width * p.height;
+  int count = 0;
+  for (int m = 0; m < p.num_src; ++m) {
+    const float err = GeomReprojErrorDev(p, src_P + m * 12, src_inv_P + m * 12,
+                                         src_depths + m * plane, px, py, pz,
+                                         col, row);
+    // A degenerate reprojection (err < 0) does not count toward consistency.
+    if (err >= 0.0f && err <= p.max_cost) ++count;
+  }
+  out_count[gid] = count;
 }
 )METAL";
 
@@ -491,6 +536,7 @@ struct MetalContext {
   id<MTLComputePipelineState> hypothesis_pipeline = nil;
   id<MTLComputePipelineState> hypothesis_mv_pipeline = nil;
   id<MTLComputePipelineState> geom_pipeline = nil;
+  id<MTLComputePipelineState> geom_count_pipeline = nil;
   bool valid = false;
 
   MetalContext() {
@@ -564,6 +610,16 @@ struct MetalContext {
       geom_pipeline =
           [device newComputePipelineStateWithFunction:geom_fn error:&error];
       if (geom_pipeline == nil) {
+        return;
+      }
+      id<MTLFunction> geom_count_fn =
+          [library newFunctionWithName:@"geom_consistency_count"];
+      if (geom_count_fn == nil) {
+        return;
+      }
+      geom_count_pipeline =
+          [device newComputePipelineStateWithFunction:geom_count_fn error:&error];
+      if (geom_count_pipeline == nil) {
         return;
       }
       valid = true;
@@ -996,6 +1052,83 @@ bool EvaluateHypothesisCostMultiViewMetal(const float* ref_image,
   return true;
 }
 
+bool ComputeGeomConsistencyCountMetal(int width,
+                                      int height,
+                                      const float ref_inv_K[4],
+                                      const float ref_K[4],
+                                      const float* src_P,
+                                      const float* src_inv_P,
+                                      const float* src_depth_maps,
+                                      int num_src,
+                                      float max_cost,
+                                      const int* rows,
+                                      const int* cols,
+                                      const float* depths,
+                                      int num,
+                                      int* out_count) {
+  MetalContext& ctx = GetContext();
+  if (!ctx.valid || num <= 0 || num_src <= 0 || num_src > kMaxMetalMvsViews ||
+      width <= 0 || height <= 0) {
+    return false;
+  }
+  @autoreleasepool {
+    GeomParams params;
+    std::memcpy(params.ref_inv_K, ref_inv_K, sizeof(params.ref_inv_K));
+    std::memcpy(params.ref_K, ref_K, sizeof(params.ref_K));
+    params.width = width;
+    params.height = height;
+    params.num_src = num_src;
+    params.max_cost = max_cost;
+    params.num = static_cast<uint32_t>(num);
+
+    const size_t n = static_cast<size_t>(num);
+    const size_t m = static_cast<size_t>(num_src);
+    const size_t plane = static_cast<size_t>(width) * height;
+    auto buf = [&](const void* ptr, size_t bytes) {
+      return [ctx.device newBufferWithBytes:ptr
+                                     length:bytes
+                                    options:MTLResourceStorageModeShared];
+    };
+    id<MTLBuffer> P_buf = buf(src_P, m * 12 * sizeof(float));
+    id<MTLBuffer> iP_buf = buf(src_inv_P, m * 12 * sizeof(float));
+    id<MTLBuffer> depths_map_buf = buf(src_depth_maps, m * plane * sizeof(float));
+    id<MTLBuffer> rows_buf = buf(rows, n * sizeof(int));
+    id<MTLBuffer> cols_buf = buf(cols, n * sizeof(int));
+    id<MTLBuffer> depths_buf = buf(depths, n * sizeof(float));
+    id<MTLBuffer> count_buf =
+        [ctx.device newBufferWithLength:n * sizeof(int)
+                                options:MTLResourceStorageModeShared];
+    if (P_buf == nil || iP_buf == nil || depths_map_buf == nil ||
+        rows_buf == nil || cols_buf == nil || depths_buf == nil ||
+        count_buf == nil) {
+      return false;
+    }
+
+    id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:ctx.geom_count_pipeline];
+    [enc setBytes:&params length:sizeof(params) atIndex:0];
+    [enc setBuffer:P_buf offset:0 atIndex:1];
+    [enc setBuffer:iP_buf offset:0 atIndex:2];
+    [enc setBuffer:depths_map_buf offset:0 atIndex:3];
+    [enc setBuffer:rows_buf offset:0 atIndex:4];
+    [enc setBuffer:cols_buf offset:0 atIndex:5];
+    [enc setBuffer:depths_buf offset:0 atIndex:6];
+    [enc setBuffer:count_buf offset:0 atIndex:7];
+
+    NSUInteger tg = ctx.geom_count_pipeline.maxTotalThreadsPerThreadgroup;
+    if (tg > n) tg = n;
+    if (tg == 0) tg = 1;
+    [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    std::memcpy(out_count, [count_buf contents], n * sizeof(int));
+  }
+  return true;
+}
+
 bool ComputeGeomConsistencyCostMetal(int width,
                                      int height,
                                      const float ref_inv_K[4],
@@ -1124,6 +1257,45 @@ void RandomNormal(std::mt19937& rng, const float rik[4], int row, int col,
     n[1] = -n[1];
     n[2] = -n[2];
   }
+}
+
+// Randomly perturb a unit normal by a small random rotation (R = Rx*Ry*Rz with
+// angles in +/- perturbation), keeping it pointing toward the camera. Verbatim
+// port of COLMAP's PerturbNormal (patch_match_cuda.cu): wider `perturbation`
+// early (anchored exploration around the current normal) shrinking to local
+// refinement. General PatchMatch refinement, not dataset-specific.
+void PerturbNormal(std::mt19937& rng, const float rik[4], int row, int col,
+                   const float normal[3], float perturbation, float out[3]) {
+  std::uniform_real_distribution<float> u(0.0f, 1.0f);
+  const float ray[3] = {rik[0] * col + rik[1], rik[2] * row + rik[3], 1.0f};
+  float pert = perturbation;
+  for (int trial = 0; trial < 4; ++trial) {
+    const float a1 = (u(rng) - 0.5f) * pert;
+    const float a2 = (u(rng) - 0.5f) * pert;
+    const float a3 = (u(rng) - 0.5f) * pert;
+    const float s1 = std::sin(a1), s2 = std::sin(a2), s3 = std::sin(a3);
+    const float c1 = std::cos(a1), c2 = std::cos(a2), c3 = std::cos(a3);
+    const float R0 = c2 * c3, R1 = -c2 * s3, R2 = s2;
+    const float R3 = c1 * s3 + c3 * s1 * s2, R4 = c1 * c3 - s1 * s2 * s3,
+                R5 = -c2 * s1;
+    const float R6 = s1 * s3 - c1 * c3 * s2, R7 = c3 * s1 + c1 * s2 * s3,
+                R8 = c1 * c2;
+    const float p0 = R0 * normal[0] + R1 * normal[1] + R2 * normal[2];
+    const float p1 = R3 * normal[0] + R4 * normal[1] + R5 * normal[2];
+    const float p2 = R6 * normal[0] + R7 * normal[1] + R8 * normal[2];
+    if (p0 * ray[0] + p1 * ray[1] + p2 * ray[2] >= 0.0f) {
+      pert *= 0.5f;  // perturbed normal faces away from camera; retry smaller.
+      continue;
+    }
+    const float inv = 1.0f / std::sqrt(p0 * p0 + p1 * p1 + p2 * p2 + 1e-20f);
+    out[0] = p0 * inv;
+    out[1] = p1 * inv;
+    out[2] = p2 * inv;
+    return;
+  }
+  out[0] = normal[0];
+  out[1] = normal[1];
+  out[2] = normal[2];
 }
 
 // Row-major coordinates for every pixel of a width x height grid.
@@ -1317,45 +1489,25 @@ static bool OptimizeWithEval(
       accept();
     }
 
-    // --- Normal refinement: deterministic small tilts about BOTH the x and y
-    //     axes (4 candidates). Tilting about x alone cannot recover surfaces
-    //     slanted about the vertical axis (e.g. facades viewed obliquely), which
-    //     left normals stuck near fronto-parallel. The larger of the two angles
-    //     is `pert` (the shrinking schedule), the magnitude amplified a bit so
-    //     normals can actually swing toward slanted ground truth. ---
-    const float na = 2.0f * pert;  // normal-tilt magnitude.
-    const struct {
-      int axis;      // 0 = x, 1 = y.
-      float angle;
-    } ntilts[4] = {{0, na}, {0, -na}, {1, na}, {1, -na}};
-    for (int s = 0; s < 4; ++s) {
+    // --- Normal refinement: COLMAP-style PerturbNormal (random 3-axis rotation
+    //     of the CURRENT normal), keeping depth fixed. Anchored to the current
+    //     estimate and wide early (so a fronto-parallel normal can swing toward a
+    //     steeply slanted surface), shrinking to local refinement -- unlike the
+    //     fully-random {keep-depth, rand-n} candidate above, this converges. Two
+    //     independent draws per iteration. perturbation in radians, schedule
+    //     from the iteration index (general, not dataset-tuned). ---
+    const float normal_pert = 2.0f * std::pow(0.5f, static_cast<float>(iter));
+    for (int s = 0; s < 2; ++s) {
       copy_best_to_cand();
-      const float ca = std::cos(ntilts[s].angle), sa = std::sin(ntilts[s].angle);
       for (size_t i = 0; i < N; ++i) {
-        const float nx = best_normal[3 * i + 0];
-        const float ny = best_normal[3 * i + 1];
-        const float nz = best_normal[3 * i + 2];
-        float tn[3];
-        if (ntilts[s].axis == 0) {  // rotate about x.
-          tn[0] = nx;
-          tn[1] = ca * ny - sa * nz;
-          tn[2] = sa * ny + ca * nz;
-        } else {  // rotate about y.
-          tn[0] = ca * nx + sa * nz;
-          tn[1] = ny;
-          tn[2] = -sa * nx + ca * nz;
-        }
-        // Keep it pointing toward the camera (negative z in the ref frame).
-        if (tn[2] > 0.0f) {
-          tn[0] = -tn[0];
-          tn[1] = -tn[1];
-          tn[2] = -tn[2];
-        }
-        const float inv = 1.0f / std::sqrt(tn[0] * tn[0] + tn[1] * tn[1] +
-                                           tn[2] * tn[2] + 1e-20f);
-        cand_normal[3 * i + 0] = tn[0] * inv;
-        cand_normal[3 * i + 1] = tn[1] * inv;
-        cand_normal[3 * i + 2] = tn[2] * inv;
+        const int r = static_cast<int>(i / W);
+        const int c = static_cast<int>(i % W);
+        float pn[3];
+        PerturbNormal(rng, ref_inv_K, r, c, &best_normal[3 * i], normal_pert,
+                      pn);
+        cand_normal[3 * i + 0] = pn[0];
+        cand_normal[3 * i + 1] = pn[1];
+        cand_normal[3 * i + 2] = pn[2];
       }
       if (!eval(cand_depth, cand_normal, cand_cost)) return false;
       accept();
@@ -1370,6 +1522,29 @@ static bool OptimizeWithEval(
         const int r = static_cast<int>(i / W);
         const int c = static_cast<int>(i % W);
         cand_depth[i] = depth_min + uni01(rng) * (depth_max - depth_min);
+        float rn[3];
+        RandomNormal(rng, ref_inv_K, r, c, rn);
+        cand_normal[3 * i + 0] = rn[0];
+        cand_normal[3 * i + 1] = rn[1];
+        cand_normal[3 * i + 2] = rn[2];
+      }
+      if (!eval(cand_depth, cand_normal, cand_cost)) return false;
+      accept();
+    }
+
+    // --- Decoupled normal resample: KEEP the (already well-converged) depth and
+    //     draw a fresh full-hemisphere normal. This is COLMAP's {curr_d, rand_n}
+    //     candidate (patch_match_cuda.cu): the joint random restart above pairs a
+    //     good normal with a random (usually wrong) depth so it is rejected and
+    //     the normal can never improve independently -- this candidate lets a
+    //     correct slanted normal be accepted while the good depth is held fixed.
+    //     General PatchMatch move (Bleyer 2011 / Schonberger 2016), not tuned to
+    //     any dataset. ---
+    {
+      copy_best_to_cand();  // cand_depth = best_depth (kept).
+      for (size_t i = 0; i < N; ++i) {
+        const int r = static_cast<int>(i / W);
+        const int c = static_cast<int>(i % W);
         float rn[3];
         RandomNormal(rng, ref_inv_K, r, c, rn);
         cand_normal[3 * i + 0] = rn[0];

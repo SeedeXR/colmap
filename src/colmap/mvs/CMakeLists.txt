@@ -67,8 +67,7 @@ endif()
 
 # Metal PatchMatch MVS compute core (Apple only). The real Objective-C++
 # implementation compiles under METAL_ENABLED; otherwise a stub reports the
-# backend as unavailable so callers use the CPU/CUDA path. Mirrors the
-# feature/sift_matcher_metal gating exactly.
+# backend as unavailable so callers use the CPU/CUDA path.
 if(METAL_ENABLED AND APPLE)
     target_sources(colmap_mvs PRIVATE patch_match_metal.mm
                                       patch_match_metal_controller.cc)

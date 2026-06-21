@@ -35,6 +35,7 @@
 #include "colmap/util/file.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/progress.h"
 #include "colmap/util/timer.h"
 
 #include <fstream>
@@ -361,11 +362,16 @@ void VocabTreePairGenerator::IndexImages(
   index_options.num_checks = options_.num_checks;
   index_options.num_threads = options_.num_threads;
 
+  // Liveness signal during the (long, otherwise progress-silent) indexing phase
+  // so orchestrators don't time out. No-op unless --progress_format is set.
+  HeartbeatThrottle heartbeat("vocab_tree_indexing");
+
   for (size_t i = 0; i < image_ids.size(); ++i) {
     Timer timer;
     timer.Start();
     LOG(INFO) << StringPrintf(
         "Indexing image [%d/%d]", i + 1, image_ids.size());
+    heartbeat.Tick();
     auto keypoints = *cache_->GetKeypoints(image_ids[i]);
     auto descriptors = *cache_->GetDescriptors(image_ids[i]);
     if (visual_index_ == nullptr) {

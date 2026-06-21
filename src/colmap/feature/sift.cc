@@ -29,7 +29,6 @@
 
 #include "colmap/feature/sift.h"
 
-#include "colmap/feature/sift_matcher_metal.h"
 #include "colmap/feature/utils.h"
 #include "colmap/math/math.h"
 #include "colmap/util/cuda.h"
@@ -1075,65 +1074,20 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
     if (options_.sift->cpu_brute_force_matcher) {
       const auto& descriptors1 = image1.descriptors->data;
       const auto& descriptors2 = image2.descriptors->data;
-      const int num1 = static_cast<int>(descriptors1.rows());
-      const int num2 = static_cast<int>(descriptors2.rows());
       const bool cross_check = options_.sift->cross_check;
 
-      // On Apple Silicon, run the entire brute-force match -- the dense
-      // O(N1*N2*128) dot-product GEMM AND the best/second-best ratio-test
-      // reduction -- on the Metal GPU, so the large N1*N2 matrix never returns
-      // to the CPU; only the per-descriptor best indices do. This is the macOS
-      // analogue of the CUDA SiftMatchGPU. Results are numerically equivalent
-      // to the CPU path (verified by match-count / reconstruction tolerance).
-      // Falls back to the CPU dot-product + reduction on any failure.
-      bool done = false;
-      if (IsSiftMetalMatcherAvailable() && num1 > 0 && num2 > 0 &&
-          descriptors1.cols() == descriptors2.cols()) {
-        std::vector<int> best_1to2(num1);
-        std::vector<int> best_2to1(cross_check ? num2 : 0);
-        if (MatchSiftDescriptorsMetal(descriptors1.data(),
-                                      num1,
-                                      descriptors2.data(),
-                                      num2,
-                                      static_cast<int>(descriptors1.cols()),
-                                      options_.sift->max_distance,
-                                      options_.sift->max_ratio,
-                                      cross_check,
-                                      best_1to2.data(),
-                                      cross_check ? best_2to1.data() : nullptr)) {
-          matches->clear();
-          for (int i1 = 0; i1 < num1; ++i1) {
-            const int i2 = best_1to2[i1];
-            if (i2 < 0) {
-              continue;
-            }
-            // Cross-check: keep only mutually-best matches.
-            if (cross_check && (i2 >= num2 || best_2to1[i2] != i1)) {
-              continue;
-            }
-            FeatureMatch match;
-            match.point2D_idx1 = i1;
-            match.point2D_idx2 = i2;
-            matches->push_back(match);
-          }
-          done = true;
-        }
-      }
-
-      if (!done) {
-        const Eigen::RowMajorMatrixXf dot_products =
-            ComputeSiftDistanceMatrix(DistanceType::DOT_PRODUCT,
-                                      nullptr,
-                                      nullptr,
-                                      descriptors1,
-                                      descriptors2,
-                                      nullptr);
-        FindBestMatchesBruteForce(dot_products,
-                                  options_.sift->max_ratio,
-                                  options_.sift->max_distance,
-                                  cross_check,
-                                  matches);
-      }
+      const Eigen::RowMajorMatrixXf dot_products =
+          ComputeSiftDistanceMatrix(DistanceType::DOT_PRODUCT,
+                                    nullptr,
+                                    nullptr,
+                                    descriptors1,
+                                    descriptors2,
+                                    nullptr);
+      FindBestMatchesBruteForce(dot_products,
+                                options_.sift->max_ratio,
+                                options_.sift->max_distance,
+                                cross_check,
+                                matches);
       return;
     }
 
@@ -1609,19 +1563,10 @@ std::unique_ptr<FeatureMatcher> CreateSiftFeatureMatcher(
       LOG(INFO) << "Creating SIFT GPU feature matcher";
       return SiftGPUFeatureMatcher::Create(options);
 #else
-      // No CUDA/GLSL SiftMatchGPU in this build. On Apple Silicon, satisfy the
-      // GPU request with the Metal-accelerated brute-force matcher (which is
-      // exactly what SiftMatchGPU does -- a brute-force dot-product GEMM on the
-      // GPU). We force the brute-force path so it routes through the Metal
-      // kernels; results are equivalent to the CPU matcher.
-      if (IsSiftMetalMatcherAvailable()) {
-        LOG(INFO) << "Creating SIFT Metal (GPU) feature matcher";
-        FeatureMatchingOptions metal_options = options;
-        metal_options.sift =
-            std::make_shared<SiftMatchingOptions>(*options.sift);
-        metal_options.sift->cpu_brute_force_matcher = true;
-        return SiftCPUFeatureMatcher::Create(metal_options);
-      }
+      // No CUDA/GLSL SiftMatchGPU in this build (e.g. Apple Silicon). GPU
+      // matching is unavailable; FeatureMatchingOptions::Check() rejects
+      // use_gpu here with guidance to set use_gpu=false (the CPU matcher is in
+      // fact faster on Apple Silicon -- see memory/future_enhancements.md B.2).
       return nullptr;
 #endif  // COLMAP_GPU_ENABLED
     } else {

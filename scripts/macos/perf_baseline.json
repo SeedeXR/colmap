@@ -1,0 +1,11 @@
+{
+  "extract_gb": 2.19,
+  "extract_s": 3.47,
+  "map_gb": 0.098,
+  "map_s": 0.61,
+  "match_gb": 0.307,
+  "match_s": 0.72,
+  "reg_images": 8,
+  "reproj_px": 0.478652,
+  "size": 8
+}

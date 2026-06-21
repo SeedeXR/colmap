@@ -73,23 +73,30 @@ colmap feature_extractor --image_path IMAGES --database_path DB \
     --SiftExtraction.first_octave 0 --FeatureExtraction.max_memory_gb 6
 ```
 
-Measured end-to-end (extract → Metal match → map) this stays at **~2.2 GB peak**
+Measured end-to-end (extract → match → map) this stays at **~2.2 GB peak**
 across 4–32 images, with all images registered (see
 `scripts/macos/pipeline_regression.sh`).
 
-## Feature matching on the GPU (Metal)
+## Feature matching (CPU — fastest on Apple Silicon)
 
-macOS has no CUDA and the legacy GLSL `SiftMatchGPU` is deprecated, so matching
-historically ran on the CPU. With `METAL_ENABLED`, `--FeatureMatching.use_gpu 1`
-runs brute-force descriptor matching on the Apple GPU (MPS) — the macOS
-equivalent of CUDA's `SiftMatchGPU`. Measured: **~60× faster** brute-force
-matching (730 s → 10.8 s on 24 images) with **identical** match results.
+macOS has no CUDA and the legacy GLSL `SiftMatchGPU` is deprecated, so feature
+matching runs on the CPU — which is also the **fastest** option here. The CPU
+matcher threads multiple image pairs concurrently over Eigen's NEON-vectorized
+GEMM. Just run the matcher with its defaults (`use_gpu` defaults to `0`):
 
 ```bash
-colmap exhaustive_matcher --database_path DB --FeatureMatching.use_gpu 1
+colmap exhaustive_matcher --database_path DB --FeatureMatching.num_threads 4
 ```
 
-Set `COLMAP_DISABLE_METAL=1` to force the CPU path (debugging/benchmarking).
+Benchmarked on south-building (32 images, 405k descriptors, 496 pairs, 4
+threads): the default CPU (FAISS) matcher ran in **15.3 s**, exact CPU brute
+force in 21.1 s. An earlier Metal/MPS GPU matcher was evaluated and **removed** —
+it was output-identical to the CPU matcher but slower (~30 s) on this hardware,
+because per-pair GPU dispatch + synchronous waits serialize through one command
+queue while the CPU parallelizes pairs across cores. `--FeatureMatching.use_gpu 1`
+is therefore unsupported on non-CUDA macOS builds and reports an error; leave it
+at the default `0`. (Note: this supersedes earlier guidance that recommended
+Metal matching.)
 
 ## Choosing a mapper
 

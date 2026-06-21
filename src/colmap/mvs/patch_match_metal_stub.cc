@@ -151,6 +151,23 @@ bool ComputeGeomConsistencyCostMetal(int /*width*/,
   return false;
 }
 
+bool ComputeGeomConsistencyCountMetal(int /*width*/,
+                                      int /*height*/,
+                                      const float /*ref_inv_K*/[4],
+                                      const float /*ref_K*/[4],
+                                      const float* /*src_P*/,
+                                      const float* /*src_inv_P*/,
+                                      const float* /*src_depth_maps*/,
+                                      int /*num_src*/,
+                                      float /*max_cost*/,
+                                      const int* /*rows*/,
+                                      const int* /*cols*/,
+                                      const float* /*depths*/,
+                                      int /*num*/,
+                                      int* /*out_count*/) {
+  return false;
+}
+
 bool RunPatchMatchOptimizerMetal(const float* /*ref_image*/,
                                  const float* /*src_image*/,
                                  int /*width*/,

@@ -30,6 +30,7 @@
 #include "colmap/util/base_controller.h"
 
 #include "colmap/util/logging.h"
+#include "colmap/util/signal_handler.h"
 
 namespace colmap {
 
@@ -59,8 +60,12 @@ void BaseController::SetCheckIfStoppedFunc(std::function<bool()> func) {
 bool BaseController::CheckIfStopped() {
   if (check_if_stopped_fn_)
     return check_if_stopped_fn_();
-  else
-    return false;
+  // No explicit predicate (controller run directly, not via ControllerThread):
+  // still honor a process-level SIGINT/SIGTERM so any cooperative loop that
+  // polls CheckIfStopped() shuts down cleanly on Ctrl-C. ControllerThread sets
+  // a predicate that already folds in IsInterruptRequested() via
+  // Thread::IsStopped(), so this only affects the direct-run path.
+  return IsInterruptRequested();
 }
 
 }  // namespace colmap

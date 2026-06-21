@@ -45,6 +45,7 @@
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/signal_handler.h"
 #include "colmap/util/string.h"
 #include "colmap/util/opengl_utils.h"
 
@@ -256,6 +257,11 @@ bool RunIncrementalMapperImpl(
 
   IncrementalPipeline mapper(mapper_options, database, reconstruction_manager);
 
+  // The mapper's Run() is called directly (not via ControllerThread), so it
+  // cooperatively stops on SIGINT/SIGTERM through BaseController::CheckIfStopped's
+  // default IsInterruptRequested() path; the partial reconstruction is written
+  // below. (No special wiring needed here.)
+
   // In case a new reconstruction is started, write results of individual sub-
   // models to as their reconstruction finishes instead of writing all results
   // after all reconstructions finished.
@@ -286,6 +292,12 @@ bool RunIncrementalMapperImpl(
   }
 
   mapper.Run();
+
+  const bool interrupted = IsInterruptRequested();
+  if (interrupted) {
+    LOG(WARNING) << "Mapping interrupted by signal; writing the in-progress "
+                    "reconstruction(s) before exiting.";
+  }
 
   if (reconstruction_manager->Size() == 0) {
     LOG(ERROR) << "Failed to create any sparse model";
@@ -321,6 +333,19 @@ bool RunIncrementalMapperImpl(
     }
 
     reconstruction->Write(output_path);
+  } else {
+    // The per-model callback writes each sub-model as it finishes. If the run
+    // was interrupted mid-model, that callback never fired for the in-progress
+    // sub-model(s), so write any reconstructions it did not. On normal
+    // completion prev_num_reconstructions == Size() and this loop is a no-op.
+    for (size_t i = prev_num_reconstructions; i < reconstruction_manager->Size();
+         ++i) {
+      const auto reconstruction_path = output_path / std::to_string(i);
+      CreateDirIfNotExists(reconstruction_path);
+      reconstruction_manager->Get(i)->Write(reconstruction_path);
+      LOG(INFO) << "Wrote in-progress reconstruction " << i << " to "
+                << reconstruction_path;
+    }
   }
 
   return true;
@@ -369,6 +394,9 @@ int RunMapper(int argc, char** argv) {
     }
   }
 
+  // An interrupted (but partially saved) run is reported with the signal's exit
+  // code centrally in main() (see exe/colmap.cc); here we just report success on
+  // the work that was written.
   return EXIT_SUCCESS;
 }
 
@@ -590,6 +618,9 @@ int RunPosePriorMapper(int argc, char** argv) {
     }
   }
 
+  // An interrupted (but partially saved) run is reported with the signal's exit
+  // code centrally in main() (see exe/colmap.cc); here we just report success on
+  // the work that was written.
   return EXIT_SUCCESS;
 }
 

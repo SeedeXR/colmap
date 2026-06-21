@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "colmap/util/timer.h"
+
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -119,6 +121,24 @@ class ProgressReporter {
   ProgressFormat format_ = ProgressFormat::kNone;
   int progress_every_ = 0;  // 0 = use per-stage default
   bool schema_emitted_ = false;
+};
+
+// Throttled liveness emitter for a single long, otherwise progress-silent phase
+// (bundle adjustment, vocab-tree indexing, dense stereo, ...). Construct one at
+// the start of the phase and call Tick() frequently (e.g. each iteration/image);
+// it emits ProgressReporter::Default().Heartbeat(stage, elapsed) at most once per
+// `interval_s`. A no-op when no --progress_format is set. Centralizes the
+// timer + throttle so every phase reports liveness the same way.
+class HeartbeatThrottle {
+ public:
+  explicit HeartbeatThrottle(std::string stage, double interval_s = 5.0);
+  void Tick();
+
+ private:
+  const std::string stage_;
+  const double interval_s_;
+  double last_emit_s_ = 0.0;
+  Timer timer_;
 };
 
 }  // namespace colmap

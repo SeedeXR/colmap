@@ -220,6 +220,19 @@ void ProgressReporter::Heartbeat(const std::string& stage, double elapsed_s) {
   EmitLine(ss.str());
 }
 
+HeartbeatThrottle::HeartbeatThrottle(std::string stage, double interval_s)
+    : stage_(std::move(stage)), interval_s_(interval_s) {
+  timer_.Start();
+}
+
+void HeartbeatThrottle::Tick() {
+  const double elapsed_s = timer_.ElapsedSeconds();
+  if (elapsed_s - last_emit_s_ >= interval_s_) {
+    ProgressReporter::Default().Heartbeat(stage_, elapsed_s);
+    last_emit_s_ = elapsed_s;
+  }
+}
+
 void ProgressReporter::StageCompleted(const std::string& stage,
                                       double elapsed_s,
                                       const std::vector<std::string>& outputs) {

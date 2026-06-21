@@ -48,7 +48,7 @@ struct PatchMatchOptions;  // mvs/patch_match_options.h
 // the port is provably the SAME algorithm, not an approximation.
 //
 // The interface is intentionally free of Metal and Eigen types so it can be
-// included from any translation unit (mirrors feature/sift_matcher_metal.h).
+// included from any translation unit (plain C++ headers, no Objective-C).
 
 // Whether a usable Metal GPU is available at runtime. Always false in builds
 // without COLMAP_METAL_ENABLED, or when no Metal device is present (e.g. the
@@ -243,6 +243,30 @@ bool ComputeGeomConsistencyCostMetal(int width,
                                      const float* depths,
                                      int num,
                                      float* out_cost);
+
+// Fused geometric-consistency count: like ComputeGeomConsistencyCostMetal but
+// evaluates ALL source views in a single dispatch and writes, per pixel, the
+// number of sources whose forward-backward reprojection error is <= max_cost.
+// This is the count-based consistency filter COLMAP applies (a pixel survives if
+// it is consistent in >= filter_min_num_consistent views); doing it in one
+// dispatch over a single contiguous source-depth upload avoids the per-source
+// dispatch loop. A degenerate reprojection does not count. Same argument layout
+// as ComputeGeomConsistencyCostMetal except `out_count` (length `num`).
+// Returns false if Metal is unavailable or inputs are invalid.
+bool ComputeGeomConsistencyCountMetal(int width,
+                                      int height,
+                                      const float ref_inv_K[4],
+                                      const float ref_K[4],
+                                      const float* src_P,
+                                      const float* src_inv_P,
+                                      const float* src_depth_maps,
+                                      int num_src,
+                                      float max_cost,
+                                      const int* rows,
+                                      const int* cols,
+                                      const float* depths,
+                                      int num,
+                                      int* out_count);
 
 // PatchMatch optimizer for ONE source view: iteratively improves a per-pixel
 // (depth, normal) field over the whole image by (a) spatial PROPAGATION of each

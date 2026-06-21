@@ -32,7 +32,6 @@
 #include "colmap/feature/aliked.h"
 #include "colmap/feature/onnx_matchers.h"
 #include "colmap/feature/sift.h"
-#include "colmap/feature/sift_matcher_metal.h"
 #include "colmap/util/misc.h"
 
 namespace colmap {
@@ -87,11 +86,6 @@ bool FeatureMatchingOptions::RequiresOpenGL() const {
 #ifdef COLMAP_CUDA_ENABLED
       return false;
 #else
-      // The Metal matcher (Apple Silicon) needs no OpenGL context; only the
-      // legacy GLSL SiftMatchGPU path does.
-      if (IsSiftMetalMatcherAvailable()) {
-        return false;
-      }
       return use_gpu;
 #endif
     }
@@ -109,14 +103,10 @@ bool FeatureMatchingOptions::Check() const {
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
 #ifndef COLMAP_GPU_ENABLED
-    // On Apple Silicon, GPU SIFT brute-force matching is provided by Metal even
-    // without CUDA/OpenGL (see feature/sift_matcher_metal).
-    if (!(type == FeatureMatcherType::SIFT_BRUTEFORCE &&
-          IsSiftMetalMatcherAvailable())) {
-      LOG(ERROR) << "Cannot use GPU feature matching without CUDA, OpenGL, or "
-                    "Metal support. Set use_gpu to false.";
-      return false;
-    }
+    LOG(ERROR) << "Cannot use GPU feature matching without CUDA or OpenGL "
+                  "support. Set use_gpu to false (on Apple Silicon the CPU "
+                  "matcher is also faster -- see memory/future_enhancements.md).";
+    return false;
 #endif
   }
   CHECK_OPTION_GE(max_num_matches, 0);

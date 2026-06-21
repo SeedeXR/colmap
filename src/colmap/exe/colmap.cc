@@ -47,6 +47,8 @@
 #include <omp.h>
 #endif
 
+#include <set>
+
 namespace {
 
 using command_func_t = std::function<int(int, char**)>;
@@ -128,11 +130,115 @@ void ShowHelp(
                "--output_path MODEL\n";
   std::cout << "  ...\n";
 
-  std::cout << "Available commands:\n";
-  std::cout << "  help\n";
-  std::cout << "  version\n";
+  // Command groups for a readable listing. This only organizes the display;
+  // command dispatch still uses the flat `commands` list. Any command not
+  // assigned to a group is printed under "Other" so new commands are never
+  // hidden from --help.
+  struct CommandGroup {
+    std::string title;
+    std::vector<std::string> names;
+  };
+  static const std::vector<CommandGroup> kGroups = {
+      {"General",
+       {"gui",
+        "automatic_reconstructor",
+        "project_generator",
+        "mapper_advisor",
+        "system_info"}},
+      {"Database",
+       {"database_creator", "database_cleaner", "database_merger"}},
+      {"Feature extraction & matching",
+       {"feature_extractor",
+        "feature_importer",
+        "exhaustive_matcher",
+        "sequential_matcher",
+        "spatial_matcher",
+        "transitive_matcher",
+        "vocab_tree_matcher",
+        "vocab_tree_builder",
+        "vocab_tree_retriever",
+        "matches_importer",
+        "geometric_verifier",
+        "guided_geometric_verifier"}},
+      {"Sparse reconstruction (SfM)",
+       {"mapper",
+        "global_mapper",
+        "hierarchical_mapper",
+        "pose_prior_mapper",
+        "image_registrator",
+        "point_triangulator",
+        "bundle_adjuster",
+        "rig_configurator",
+        "view_graph_calibrator",
+        "rotation_averager",
+        "point_filtering",
+        "color_extractor"}},
+      {"Dense reconstruction & meshing",
+       {"image_undistorter",
+        "image_undistorter_standalone",
+        "image_rectifier",
+        "patch_match_stereo",
+        "stereo_fusion",
+        "poisson_mesher",
+        "delaunay_mesher",
+        "advancing_front_mesher",
+        "mesh_simplifier",
+        "mesh_texturer"}},
+      {"Model utilities",
+       {"model_analyzer",
+        "model_aligner",
+        "model_comparer",
+        "model_converter",
+        "model_cropper",
+        "model_clusterer",
+        "model_merger",
+        "model_splitter",
+        "model_transformer",
+        "model_orientation_aligner",
+        "image_deleter",
+        "image_filterer"}},
+  };
+
+  std::set<std::string> available;
   for (const auto& command : commands) {
-    std::cout << "  " << command.first << '\n';
+    available.insert(command.first);
+  }
+
+  std::cout << "Available commands:\n";
+  std::set<std::string> printed;
+  for (const auto& group : kGroups) {
+    std::vector<std::string> names;
+    for (const std::string& name : group.names) {
+      if (available.count(name) > 0) {
+        names.push_back(name);
+        printed.insert(name);
+      }
+    }
+    if (names.empty() && group.title != "General") {
+      continue;
+    }
+    std::cout << "\n  " << group.title << ":\n";
+    // The built-in help/version pseudo-commands live under General.
+    if (group.title == "General") {
+      std::cout << "    help\n";
+      std::cout << "    version\n";
+    }
+    for (const std::string& name : names) {
+      std::cout << "    " << name << '\n';
+    }
+  }
+
+  std::vector<std::string> others;
+  for (const auto& command : commands) {
+    if (printed.count(command.first) == 0) {
+      others.push_back(command.first);
+    }
+  }
+  if (!others.empty()) {
+    std::cout << "\n  Other:\n";
+    for (const std::string& name : others) {
+      std::cout << "    " << name << '\n';
+    }
   }
   std::cout << '\n';
 }
@@ -250,7 +356,18 @@ int main(int argc, char** argv) {
       int command_argc = argc - 1;
       char** command_argv = &argv[1];
       command_argv[0] = argv[0];
-      return matched_command_func(command_argc, command_argv);
+      const int command_exit_code =
+          matched_command_func(command_argc, command_argv);
+      // Uniform process contract: if the command was interrupted by a signal
+      // (and reported success on its partial work), surface the signal's exit
+      // code (130 for SIGINT, 143 for SIGTERM) so orchestrators don't read an
+      // interrupted run as a clean success. A command that already reported its
+      // own non-zero status is left untouched. See util/signal_handler.h.
+      if (command_exit_code == EXIT_SUCCESS &&
+          colmap::IsInterruptRequested()) {
+        return colmap::GetInterruptExitCode();
+      }
+      return command_exit_code;
     }
   }
 

@@ -55,7 +55,6 @@ COLMAP_ADD_LIBRARY(
         onnx_matchers.h onnx_matchers.cc
         onnx_utils.h onnx_utils.cc
         sift.h sift.cc
-        sift_matcher_metal.h
         types.h types.cc
         utils.h utils.cc
     PUBLIC_LINK_LIBS
@@ -76,18 +75,6 @@ if(GPU_ENABLED)
     if(NOT GUI_ENABLED)
         target_link_libraries(colmap_feature PRIVATE GLEW::GLEW)
     endif()
-endif()
-
-# Metal-accelerated descriptor matching (Apple only). Compile the real
-# Objective-C++ implementation when METAL_ENABLED, else a stub that reports the
-# matcher as unavailable so sift.cc transparently uses the CPU path.
-if(METAL_ENABLED AND APPLE)
-    target_sources(colmap_feature PRIVATE sift_matcher_metal.mm)
-    set_source_files_properties(sift_matcher_metal.mm PROPERTIES
-        COMPILE_FLAGS "-fobjc-arc")
-    target_link_libraries(colmap_feature PRIVATE ${COLMAP_METAL_FRAMEWORKS})
-else()
-    target_sources(colmap_feature PRIVATE sift_matcher_metal_stub.cc)
 endif()
 
 if(OPENMP_FOUND)
@@ -137,13 +124,6 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME sift_test
     SRCS sift_test.cc
-    LINK_LIBS
-        colmap_feature
-        colmap_util
-)
-COLMAP_ADD_TEST(
-    NAME sift_matcher_metal_test
-    SRCS sift_matcher_metal_test.cc
     LINK_LIBS
         colmap_feature
         colmap_util

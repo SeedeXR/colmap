@@ -762,6 +762,94 @@ TEST(PatchMatchMetalGeom, ConsistentDepthHasLowReprojectionError) {
   EXPECT_NEAR(best_depth, d_gt, 0.4f) << "geom cost not minimized at GT depth";
 }
 
+// The fused multi-source count kernel (ComputeGeomConsistencyCountMetal) must
+// agree, per pixel, with summing the single-source cost kernel's consistency
+// verdicts -- the exact equivalence the controller relies on when it replaces
+// the per-source dispatch loop with one fused dispatch. Uses two sources, one of
+// which is invalid (zero depth map), so the per-source verdicts differ.
+TEST(PatchMatchMetalGeom, FusedCountMatchesPerSourceVerdicts) {
+  if (!IsPatchMatchMetalAvailable()) {
+    GTEST_SKIP() << "Metal not available.";
+  }
+  const int W = 180, Ht = 80;
+  const float fx = 400, fy = 400, cx = 90, cy = 40;
+  const float d_gt = 5.0f;
+  const float ref_inv_K[4] = {1.0f / fx, -cx / fx, 1.0f / fy, -cy / fy};
+  const float ref_K[4] = {fx, cx, fy, cy};
+
+  const Eigen::Matrix3f Rot =
+      Eigen::AngleAxisf(0.03f, Eigen::Vector3f::UnitY()).toRotationMatrix();
+  const Eigen::Vector3f T(0.2f, 0.0f, 0.02f);
+  Eigen::Matrix3f Ks;
+  Ks << fx, 0, cx, 0, fy, cy, 0, 0, 1;
+  Eigen::Matrix<float, 3, 4> RT;
+  RT.block<3, 3>(0, 0) = Rot;
+  RT.col(3) = T;
+  const Eigen::Matrix<float, 3, 4> P = Ks * RT;
+  Eigen::Matrix<float, 3, 4> invP;
+  invP.block<3, 3>(0, 0) = Rot.transpose() * Ks.inverse();
+  invP.col(3) = -Rot.transpose() * T;
+
+  // Two sources: source 0 has the true plane depth map, source 1 is all-invalid
+  // (zero), so source 0 is consistent near d_gt and source 1 never is.
+  std::vector<float> src_P(24), src_inv_P(24);
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 4; ++c) {
+      src_P[r * 4 + c] = P(r, c);
+      src_inv_P[r * 4 + c] = invP(r, c);
+      src_P[12 + r * 4 + c] = P(r, c);
+      src_inv_P[12 + r * 4 + c] = invP(r, c);
+    }
+
+  const Eigen::Vector3f r2 = Rot.col(2);
+  const size_t plane = static_cast<size_t>(W) * Ht;
+  std::vector<float> src_depths(2 * plane, 0.0f);  // source 1 stays zero.
+  for (int v = 0; v < Ht; ++v) {
+    for (int u = 0; u < W; ++u) {
+      const Eigen::Vector3f dir((u - cx) / fx, (v - cy) / fy, 1.0f);
+      const float t = (d_gt + r2.dot(T)) / r2.dot(dir);
+      if (t > 0) src_depths[static_cast<size_t>(v) * W + u] = t;
+    }
+  }
+
+  // Reference pixels swept across depths so verdicts span 0..2 consistent.
+  std::vector<int> rows, cols;
+  std::vector<float> depths;
+  for (int i = 0; i <= 40; ++i) {
+    rows.push_back(40);
+    cols.push_back(90);
+    depths.push_back(3.0f + (7.0f - 3.0f) * i / 40.0f);
+  }
+  const int num = static_cast<int>(depths.size());
+  const float cap = 10.0f, keep_max = 1.0f;
+
+  // Per-source verdicts via the single-source cost kernel.
+  std::vector<int> expected(num, 0);
+  for (int s = 0; s < 2; ++s) {
+    std::vector<float> cost(num, -1.0f);
+    ASSERT_TRUE(ComputeGeomConsistencyCostMetal(
+        W, Ht, ref_inv_K, ref_K, src_P.data() + s * 12,
+        src_inv_P.data() + s * 12, src_depths.data() + s * plane,
+        /*num_src=*/1, cap, rows.data(), cols.data(), depths.data(), num,
+        cost.data()));
+    for (int p = 0; p < num; ++p)
+      if (cost[p] <= keep_max) ++expected[p];
+  }
+
+  std::vector<int> count(num, -1);
+  ASSERT_TRUE(ComputeGeomConsistencyCountMetal(
+      W, Ht, ref_inv_K, ref_K, src_P.data(), src_inv_P.data(),
+      src_depths.data(), /*num_src=*/2, keep_max, rows.data(), cols.data(),
+      depths.data(), num, count.data()));
+
+  int max_seen = 0;
+  for (int p = 0; p < num; ++p) {
+    EXPECT_EQ(count[p], expected[p]) << "pixel " << p;
+    max_seen = std::max(max_seen, count[p]);
+  }
+  EXPECT_GE(max_seen, 1) << "expected at least some consistent depths near GT";
+}
+
 // Integration bridge: cameras given in COLMAP world->cam convention. Both share
 // the same rotation Q (so the reference->source relative rotation must cancel to
 // identity) and differ by a horizontal baseline, giving pure disparity. The
@@ -1119,6 +1207,113 @@ TEST(PatchMatchMetalRealData, GeomConsistencyShrinksOutliers) {
       ref_name.c_str(), n_before, med_before, p95_before, n_after, med_after,
       p95_after, 100.0 * n_after / std::max<size_t>(1, n_before));
   EXPECT_LT(p95_after, p95_before) << "geom filtering should shrink the tail";
+}
+
+// Fast single-image NORMAL-quality probe (env-gated). Computes the photometric
+// depth+normal for one reference and reports the median/p90 angular error of the
+// normals vs the CUDA golden -- the tight loop for tuning normal refinement.
+// COLMAP_DENSE_WORKSPACE + COLMAP_GOLDEN_NORMAL_DIR; COLMAP_ITERS optional.
+TEST(PatchMatchMetalRealData, NormalQualityVsGolden) {
+  if (!IsPatchMatchMetalAvailable()) {
+    GTEST_SKIP() << "Metal not available.";
+  }
+  const char* ws = std::getenv("COLMAP_DENSE_WORKSPACE");
+  const char* gold_dir = std::getenv("COLMAP_GOLDEN_NORMAL_DIR");
+  if (ws == nullptr || gold_dir == nullptr) {
+    GTEST_SKIP() << "set COLMAP_DENSE_WORKSPACE and COLMAP_GOLDEN_NORMAL_DIR.";
+  }
+  Workspace::Options opts;
+  opts.workspace_path = ws;
+  opts.workspace_format = "COLMAP";
+  opts.input_type = "photometric";
+  opts.image_as_rgb = false;
+  opts.cache_size = 6.0;
+  CachedWorkspace workspace(opts);
+  const Model& model = workspace.GetModel();
+  const std::string ref_name =
+      std::getenv("COLMAP_REF_IMAGE") ? std::getenv("COLMAP_REF_IMAGE")
+                                      : "P1180141.JPG";
+  const int R = model.GetImageIdx(ref_name);
+  ASSERT_GE(R, 0);
+  const int num_src = 6;
+  const auto overlap = model.GetMaxOverlappingImages(num_src, 1.0);
+  const auto ranges = model.ComputeDepthRanges();
+  const char* iters_env = std::getenv("COLMAP_ITERS");
+  const int iters = iters_env ? std::atoi(iters_env) : 8;
+
+  int W = 0, H = 0;
+  auto gray = [&](int idx, int& w, int& h) {
+    const Bitmap& b = workspace.GetBitmap(idx);
+    w = b.Width();
+    h = b.Height();
+    const auto& d = b.RowMajorData();
+    std::vector<float> g(static_cast<size_t>(w) * h);
+    for (size_t i = 0; i < g.size(); ++i) g[i] = d[i] / 255.0f;
+    return g;
+  };
+  const std::vector<float> ref_gray = gray(R, W, H);
+  std::vector<float> sg, sK, sR, sT;
+  int ns = 0;
+  for (int s : overlap[R]) {
+    int sw, sh;
+    std::vector<float> g = gray(s, sw, sh);
+    if (sw != W || sh != H) continue;
+    sg.insert(sg.end(), g.begin(), g.end());
+    sK.insert(sK.end(), model.images[s].GetK(), model.images[s].GetK() + 9);
+    sR.insert(sR.end(), model.images[s].GetR(), model.images[s].GetR() + 9);
+    sT.insert(sT.end(), model.images[s].GetT(), model.images[s].GetT() + 3);
+    ++ns;
+  }
+  const size_t n = static_cast<size_t>(W) * H;
+  std::vector<float> depth(n), normal(n * 3);
+  const Image& ri = model.images[R];
+  ASSERT_TRUE(EstimateDepthMapMetalFromArrays(
+      W, H, ref_gray.data(), ri.GetK(), ri.GetR(), ri.GetT(), ns, sg.data(),
+      sK.data(), sR.data(), sT.data(), (ns + 1) / 2, 5, 1, 3.0f, 0.2f,
+      ranges[R].first, ranges[R].second, iters, /*filter_min_ncc=*/0.0f,
+      depth.data(), normal.data()));
+
+  // Golden normal map (3 channels, Mat layout data[k*n + r*W + c]).
+  int gw = 0, gh = 0, gc = 0;
+  std::vector<float> gN;
+  {
+    std::FILE* f = std::fopen(
+        (std::string(gold_dir) + "/" + ref_name + ".geometric.bin").c_str(),
+        "rb");
+    ASSERT_NE(f, nullptr);
+    std::string hdr;
+    int amp = 0;
+    while (amp < 3) {
+      int ch = std::fgetc(f);
+      hdr.push_back(static_cast<char>(ch));
+      if (ch == '&') ++amp;
+    }
+    std::sscanf(hdr.c_str(), "%d&%d&%d&", &gw, &gh, &gc);
+    gN.resize(static_cast<size_t>(gw) * gh * gc);
+    std::fread(gN.data(), sizeof(float), gN.size(), f);
+    std::fclose(f);
+  }
+  ASSERT_EQ(gw, W);
+  ASSERT_EQ(gh, H);
+  ASSERT_EQ(gc, 3);
+
+  std::vector<float> errs;
+  for (size_t p = 0; p < n; ++p) {
+    if (depth[p] <= 0.0f) continue;
+    const float gx = gN[p], gy = gN[n + p], gz = gN[2 * n + p];
+    const float gnorm = std::sqrt(gx * gx + gy * gy + gz * gz);
+    if (gnorm < 0.5f) continue;  // golden invalid.
+    float mx = normal[3 * p + 0], my = normal[3 * p + 1], mz = normal[3 * p + 2];
+    const float mnorm = std::sqrt(mx * mx + my * my + mz * mz);
+    if (mnorm < 1e-6f) continue;
+    const float dot = (mx * gx + my * gy + mz * gz) / (mnorm * gnorm);
+    errs.push_back(std::acos(std::max(-1.0f, std::min(1.0f, dot))) * 57.2958f);
+  }
+  std::sort(errs.begin(), errs.end());
+  const float med = errs.empty() ? -1 : errs[errs.size() / 2];
+  const float p90 = errs.empty() ? -1 : errs[std::min(errs.size() - 1, errs.size() * 9 / 10)];
+  std::printf("[normal-quality] %s iters=%d n=%zu  median=%.1f deg  p90=%.1f deg\n",
+              ref_name.c_str(), iters, errs.size(), med, p90);
 }
 
 }  // namespace

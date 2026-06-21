@@ -36,7 +36,9 @@
 #include "colmap/estimators/cost_functions/utils.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/progress.h"
 #include "colmap/util/threading.h"
+#include "colmap/util/timer.h"
 
 #include <iomanip>
 
@@ -553,15 +555,43 @@ std::shared_ptr<CeresBundleAdjustmentSummary> CreateSummaryAndLogFailure(
   return summary;
 }
 
+// Emits a progress "heartbeat" during the (otherwise silent) Ceres solve so
+// orchestrators don't treat a long bundle adjustment as a hung process. Ceres
+// invokes this from the solver thread after each iteration; the shared
+// HeartbeatThrottle bounds it to one heartbeat per interval and is a no-op
+// unless --progress_format is set.
+class HeartbeatIterationCallback : public ceres::IterationCallback {
+ public:
+  explicit HeartbeatIterationCallback(std::string stage)
+      : heartbeat_(std::move(stage)) {}
+
+  ceres::CallbackReturnType operator()(
+      const ceres::IterationSummary& /*summary*/) override {
+    heartbeat_.Tick();
+    return ceres::SOLVER_CONTINUE;
+  }
+
+ private:
+  HeartbeatThrottle heartbeat_;
+};
+
 ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
     ceres::Problem* problem) {
-  const ceres::Solver::Options solver_options =
+  ceres::Solver::Options solver_options =
       options.ceres->CreateSolverOptions(config, *problem);
+
+  // Liveness signal during the solve. The callback is stack-owned here and
+  // outlives both Solve() calls below; Ceres holds it as a non-owning pointer.
+  HeartbeatIterationCallback heartbeat_callback("bundle_adjustment");
+  solver_options.callbacks.push_back(&heartbeat_callback);
 
   ceres::Solver::Summary ceres_summary;
   ceres::Solve(solver_options, problem, &ceres_summary);
+
+  // NOTE: the GPU->CPU fallback solve below registers the same callback on its
+  // own options so the (typically longer) fallback solve also reports liveness.
 
   if (ceres_summary.termination_type == ceres::FAILURE &&
       options.ceres->use_gpu) {
@@ -574,8 +604,9 @@ ceres::Solver::Summary SolveWithGpuFallback(
       auto cpu_options =
           std::make_shared<CeresBundleAdjustmentOptions>(*options.ceres);
       cpu_options->use_gpu = false;
-      const ceres::Solver::Options cpu_solver_options =
+      ceres::Solver::Options cpu_solver_options =
           cpu_options->CreateSolverOptions(config, *problem);
+      cpu_solver_options.callbacks.push_back(&heartbeat_callback);
       ceres::Solve(cpu_solver_options, problem, &ceres_summary);
     }
   }

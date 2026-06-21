@@ -281,14 +281,15 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
       << "The Metal patch-match backend supports `workspace_format` COLMAP "
          "only (got '"
       << workspace_format_lower << "').";
-  // The Metal backend selects source views automatically (top-overlapping, like
-  // the CUDA path's __auto__ default). Warn rather than silently ignore the
-  // CUDA-only inputs so the user knows they have no effect here.
+  // The Metal backend reads the workspace's stereo/patch-match.cfg directly
+  // (honoring __all__ / __auto__,N / explicit source lists, see BuildProblems in
+  // patch_match_metal_controller.cc), else falls back to all-images + auto
+  // source selection. It does not honor a custom `config_path` location or a
+  // `pmvs_option_name`; warn rather than silently ignore those CUDA-only inputs.
   if (!config_path.empty()) {
-    LOG(WARNING) << "The Metal patch-match backend does not yet read a "
-                    "config_path; ignoring '"
-                 << config_path.string()
-                 << "' and auto-selecting source views for all images.";
+    LOG(WARNING) << "The Metal patch-match backend reads the workspace's "
+                    "stereo/patch-match.cfg and ignores the custom config_path '"
+                 << config_path.string() << "'.";
   }
   if (!pmvs_option_name.empty() && pmvs_option_name != "option-all") {
     LOG(WARNING) << "The Metal patch-match backend ignores `pmvs_option_name` ('"
