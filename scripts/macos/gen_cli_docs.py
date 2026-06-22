@@ -423,6 +423,34 @@ llm.append(
     "auto pipeline needs CUDA)."
 )
 llm.append("")
+llm.append("## Test data (Hugging Face)")
+llm.append("Ready-to-run COLMAP/ETH3D scenes for testing this binary live at "
+           "https://huggingface.co/datasets/alexmkwizu/colmap-testing-dataset "
+           "(7 scenes, 415 images; each already in COLMAP layout).")
+llm.append("Get it with the Hugging Face CLI (pip install huggingface_hub):")
+llm.append("  # whole dataset (~3.2 GB)")
+llm.append("  hf download alexmkwizu/colmap-testing-dataset --repo-type dataset "
+           "--local-dir colmap-testing-dataset")
+llm.append("  # one scene only (recommended for a quick test)")
+llm.append("  hf download alexmkwizu/colmap-testing-dataset --repo-type dataset "
+           "--include 'south-building/**' --local-dir data")
+llm.append("Image-path differs by family: COLMAP example scenes "
+           "(gerrard-hall, south-building) use <scene>/images; ETH3D scenes "
+           "(courtyard, electro, kicker, relief, terrains) use "
+           "<scene>/images/dslr_images.")
+llm.append("Then run the pipelines above, e.g.:")
+llm.append("  colmap feature_extractor --image_path south-building/images "
+           "--database_path db.db")
+llm.append("  colmap exhaustive_matcher --database_path db.db")
+llm.append("  colmap mapper --image_path south-building/images "
+           "--database_path db.db --output_path sparse")
+llm.append("Each scene ships a ground-truth/reference COLMAP model (ETH3D: "
+           "<scene>/dslr_calibration_jpg; COLMAP examples: <scene>/sparse) for "
+           "accuracy checks, and the two COLMAP example scenes include a "
+           "prebuilt database.db (features+matches) to skip extraction/matching. "
+           "See the dataset's own README.md and llm.txt for formats and "
+           "per-scene details.")
+llm.append("")
 llm.append("## Choosing features + matcher (what to use for best output)")
 llm.append(
     "Decision drivers: scene difficulty (texture, viewpoint/illumination "
@@ -685,6 +713,40 @@ md.append(
     "For small/medium unordered photo sets, `exhaustive_matcher` is "
     "best; for ordered/video use `sequential_matcher`; for large "
     "collections use `vocab_tree_matcher`."
+)
+md.append("")
+md.append("## Test data (Hugging Face)")
+md.append("")
+md.append(
+    "Ready-to-run COLMAP + ETH3D scenes for testing this binary are published "
+    "at "
+    "[`alexmkwizu/colmap-testing-dataset`](https://huggingface.co/datasets/alexmkwizu/colmap-testing-dataset)"
+    " — 7 scenes, 415 images, each already in COLMAP's expected layout."
+)
+md.append("")
+md.append("```bash")
+md.append("# one scene (quick test); drop --include for the whole ~3.2 GB set")
+md.append(
+    "hf download alexmkwizu/colmap-testing-dataset --repo-type dataset \\"
+)
+md.append("  --include 'south-building/**' --local-dir data")
+md.append("")
+md.append("colmap feature_extractor --image_path data/south-building/images "
+          "--database_path db.db")
+md.append("colmap exhaustive_matcher --database_path db.db")
+md.append("colmap mapper --image_path data/south-building/images "
+          "--database_path db.db --output_path sparse")
+md.append("```")
+md.append("")
+md.append(
+    "Image paths differ by family: the COLMAP example scenes "
+    "(`gerrard-hall`, `south-building`) use `<scene>/images`; the ETH3D scenes "
+    "(`courtyard`, `electro`, `kicker`, `relief`, `terrains`) use "
+    "`<scene>/images/dslr_images`. Every scene ships a ground-truth/reference "
+    "model for accuracy checks (ETH3D: `dslr_calibration_jpg/`; COLMAP: "
+    "`sparse/`), and the two COLMAP scenes include a prebuilt `database.db` so "
+    "you can skip extraction+matching. The dataset's own `README.md` and "
+    "`llm.txt` document the formats and per-scene details."
 )
 md.append("")
 md.append("## Choosing the right pipeline (best output)")
