@@ -48,6 +48,61 @@ constexpr char kReprojErrorSource[] = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
 
+// Shared forward projection + projection-Jacobian core for the Pinhole model.
+// ALL reprojection kernels below go through this, so the math AND the
+// behind-camera guard live in exactly one place. valid=false (w <= 1e-6, point
+// at/behind the camera) mirrors PinholeCameraModel::ImgFromCam returning false;
+// callers then emit zero residual + zero Jacobian (the observation contributes
+// nothing), matching the CPU/Ceres path instead of producing inf/nan.
+struct ReprojCore {
+  bool valid;
+  float u, v, w, inv_w;
+  float r0, r1;            // residual.
+  float M[9];              // R(q), row-major.
+  float jpx0, jpx2, jpy1, jpy2;  // nonzero entries of d(img)/d(p_cam).
+};
+
+static ReprojCore ComputeReprojCore(float qx, float qy, float qz, float qw,
+                                    float tx, float ty, float tz,
+                                    float f1, float f2, float c1, float c2,
+                                    float X, float Y, float Z,
+                                    float ox, float oy) {
+  ReprojCore c;
+  const float vxp0 = qy * Z - qz * Y;
+  const float vxp1 = qz * X - qx * Z;
+  const float vxp2 = qx * Y - qy * X;
+  c.u = X + 2.0f * (qw * vxp0 + (qy * vxp2 - qz * vxp1)) + tx;
+  c.v = Y + 2.0f * (qw * vxp1 + (qz * vxp0 - qx * vxp2)) + ty;
+  c.w = Z + 2.0f * (qw * vxp2 + (qx * vxp1 - qy * vxp0)) + tz;
+  c.valid = c.w > 1e-6f;
+  if (!c.valid) {
+    c.inv_w = 0.0f;
+    c.r0 = 0.0f;
+    c.r1 = 0.0f;
+    for (int i = 0; i < 9; ++i) c.M[i] = 0.0f;
+    c.jpx0 = c.jpx2 = c.jpy1 = c.jpy2 = 0.0f;
+    return c;
+  }
+  c.inv_w = 1.0f / c.w;
+  const float inv_w2 = c.inv_w * c.inv_w;
+  c.r0 = f1 * c.u * c.inv_w + c1 - ox;
+  c.r1 = f2 * c.v * c.inv_w + c2 - oy;
+  c.jpx0 = f1 * c.inv_w;
+  c.jpx2 = -f1 * c.u * inv_w2;
+  c.jpy1 = f2 * c.inv_w;
+  c.jpy2 = -f2 * c.v * inv_w2;
+  c.M[0] = 1.0f - 2.0f * (qy * qy + qz * qz);
+  c.M[1] = 2.0f * (qx * qy - qw * qz);
+  c.M[2] = 2.0f * (qx * qz + qw * qy);
+  c.M[3] = 2.0f * (qx * qy + qw * qz);
+  c.M[4] = 1.0f - 2.0f * (qx * qx + qz * qz);
+  c.M[5] = 2.0f * (qy * qz - qw * qx);
+  c.M[6] = 2.0f * (qx * qz - qw * qy);
+  c.M[7] = 2.0f * (qy * qz + qw * qx);
+  c.M[8] = 1.0f - 2.0f * (qx * qx + qy * qy);
+  return c;
+}
+
 kernel void reproj_error_pinhole(constant uint& num_obs       [[buffer(0)]],
                                  device const float* poses     [[buffer(1)]],
                                  device const float* points    [[buffer(2)]],
@@ -59,66 +114,31 @@ kernel void reproj_error_pinhole(constant uint& num_obs       [[buffer(0)]],
                                  device float* jac_cam          [[buffer(8)]],
                                  uint gid [[thread_position_in_grid]]) {
   if (gid >= num_obs) return;
-
-  const float qx = poses[gid * 7 + 0];
-  const float qy = poses[gid * 7 + 1];
-  const float qz = poses[gid * 7 + 2];
-  const float qw = poses[gid * 7 + 3];
-  const float tx = poses[gid * 7 + 4];
-  const float ty = poses[gid * 7 + 5];
-  const float tz = poses[gid * 7 + 6];
-  const float X = points[gid * 3 + 0];
-  const float Y = points[gid * 3 + 1];
+  const float qx = poses[gid * 7 + 0], qy = poses[gid * 7 + 1];
+  const float qz = poses[gid * 7 + 2], qw = poses[gid * 7 + 3];
+  const float X = points[gid * 3 + 0], Y = points[gid * 3 + 1];
   const float Z = points[gid * 3 + 2];
-  const float f1 = cams[gid * 4 + 0];
-  const float f2 = cams[gid * 4 + 1];
-  const float c1 = cams[gid * 4 + 2];
-  const float c2 = cams[gid * 4 + 3];
-  const float ox = obs[gid * 2 + 0];
-  const float oy = obs[gid * 2 + 1];
-
-  // p_cam = R(q) * p + t, with R(q)*p = p + 2w(v x p) + 2 v x (v x p).
-  const float vxp0 = qy * Z - qz * Y;
-  const float vxp1 = qz * X - qx * Z;
-  const float vxp2 = qx * Y - qy * X;
-  const float vvxp0 = qy * vxp2 - qz * vxp1;
-  const float vvxp1 = qz * vxp0 - qx * vxp2;
-  const float vvxp2 = qx * vxp1 - qy * vxp0;
-  const float u = X + 2.0f * (qw * vxp0 + vvxp0) + tx;
-  const float v = Y + 2.0f * (qw * vxp1 + vvxp1) + ty;
-  const float w = Z + 2.0f * (qw * vxp2 + vvxp2) + tz;
-
-  const float inv_w = 1.0f / w;
-  const float inv_w2 = inv_w * inv_w;
-
-  // Residual = pinhole projection - observation.
-  residuals[gid * 2 + 0] = f1 * u * inv_w + c1 - ox;
-  residuals[gid * 2 + 1] = f2 * v * inv_w + c2 - oy;
-
-  // d residual / d p_cam (2x3 projection Jacobian).
-  const float jpx0 = f1 * inv_w;            // d x / d u
-  const float jpx2 = -f1 * u * inv_w2;      // d x / d w
-  const float jpy1 = f2 * inv_w;            // d y / d v
-  const float jpy2 = -f2 * v * inv_w2;      // d y / d w
-
-  // d p_cam / d point = R(q) = I + 2w[v]x + 2[v]x^2.
-  const float M00 = 1.0f - 2.0f * (qy * qy + qz * qz);
-  const float M01 = 2.0f * (qx * qy - qw * qz);
-  const float M02 = 2.0f * (qx * qz + qw * qy);
-  const float M10 = 2.0f * (qx * qy + qw * qz);
-  const float M11 = 1.0f - 2.0f * (qx * qx + qz * qz);
-  const float M12 = 2.0f * (qy * qz - qw * qx);
-  const float M20 = 2.0f * (qx * qz - qw * qy);
-  const float M21 = 2.0f * (qy * qz + qw * qx);
-  const float M22 = 1.0f - 2.0f * (qx * qx + qy * qy);
+  const ReprojCore c = ComputeReprojCore(
+      qx, qy, qz, qw, poses[gid * 7 + 4], poses[gid * 7 + 5],
+      poses[gid * 7 + 6], cams[gid * 4 + 0], cams[gid * 4 + 1],
+      cams[gid * 4 + 2], cams[gid * 4 + 3], X, Y, Z, obs[gid * 2 + 0],
+      obs[gid * 2 + 1]);
+  residuals[gid * 2 + 0] = c.r0;
+  residuals[gid * 2 + 1] = c.r1;
+  if (!c.valid) {  // point at/behind camera: zero residual + Jacobian.
+    for (int k = 0; k < 6; ++k) jac_point[gid * 6 + k] = 0.0f;
+    for (int k = 0; k < 14; ++k) jac_pose[gid * 14 + k] = 0.0f;
+    for (int k = 0; k < 8; ++k) jac_cam[gid * 8 + k] = 0.0f;
+    return;
+  }
 
   // J_point (2x3) = J_proj * M.
-  jac_point[gid * 6 + 0] = jpx0 * M00 + jpx2 * M20;
-  jac_point[gid * 6 + 1] = jpx0 * M01 + jpx2 * M21;
-  jac_point[gid * 6 + 2] = jpx0 * M02 + jpx2 * M22;
-  jac_point[gid * 6 + 3] = jpy1 * M10 + jpy2 * M20;
-  jac_point[gid * 6 + 4] = jpy1 * M11 + jpy2 * M21;
-  jac_point[gid * 6 + 5] = jpy1 * M12 + jpy2 * M22;
+  jac_point[gid * 6 + 0] = c.jpx0 * c.M[0] + c.jpx2 * c.M[6];
+  jac_point[gid * 6 + 1] = c.jpx0 * c.M[1] + c.jpx2 * c.M[7];
+  jac_point[gid * 6 + 2] = c.jpx0 * c.M[2] + c.jpx2 * c.M[8];
+  jac_point[gid * 6 + 3] = c.jpy1 * c.M[3] + c.jpy2 * c.M[6];
+  jac_point[gid * 6 + 4] = c.jpy1 * c.M[4] + c.jpy2 * c.M[7];
+  jac_point[gid * 6 + 5] = c.jpy1 * c.M[5] + c.jpy2 * c.M[8];
 
   // d(R(q)*p) / dq (3x4) w.r.t. (qx,qy,qz,qw), original point (X,Y,Z). Matches
   // QuaternionRotatePointWithJac in reprojection_error.h.
@@ -135,30 +155,29 @@ kernel void reproj_error_pinhole(constant uint& num_obs       [[buffer(0)]],
   const float Jq22 = 2.0f * (qx * X + qy * Y);
   const float Jq23 = 2.0f * (-qy * X + qx * Y);
 
-  // J_pose (2x7) = [J_quat (2x4) | J_trans (2x3)].
-  // J_quat = J_proj * Jq ; J_trans = J_proj (d p_cam / d t = I).
-  jac_pose[gid * 14 + 0] = jpx0 * Jq00 + jpx2 * Jq20;
-  jac_pose[gid * 14 + 1] = jpx0 * Jq01 + jpx2 * Jq21;
-  jac_pose[gid * 14 + 2] = jpx0 * Jq02 + jpx2 * Jq22;
-  jac_pose[gid * 14 + 3] = jpx0 * Jq03 + jpx2 * Jq23;
-  jac_pose[gid * 14 + 4] = jpx0;            // d x / d tx
-  jac_pose[gid * 14 + 5] = 0.0f;            // d x / d ty
-  jac_pose[gid * 14 + 6] = jpx2;            // d x / d tz
-  jac_pose[gid * 14 + 7] = jpy1 * Jq10 + jpy2 * Jq20;
-  jac_pose[gid * 14 + 8] = jpy1 * Jq11 + jpy2 * Jq21;
-  jac_pose[gid * 14 + 9] = jpy1 * Jq12 + jpy2 * Jq22;
-  jac_pose[gid * 14 + 10] = jpy1 * Jq13 + jpy2 * Jq23;
-  jac_pose[gid * 14 + 11] = 0.0f;           // d y / d tx
-  jac_pose[gid * 14 + 12] = jpy1;           // d y / d ty
-  jac_pose[gid * 14 + 13] = jpy2;           // d y / d tz
+  // J_pose (2x7) = [J_quat = J_proj*Jq | J_trans = J_proj].
+  jac_pose[gid * 14 + 0] = c.jpx0 * Jq00 + c.jpx2 * Jq20;
+  jac_pose[gid * 14 + 1] = c.jpx0 * Jq01 + c.jpx2 * Jq21;
+  jac_pose[gid * 14 + 2] = c.jpx0 * Jq02 + c.jpx2 * Jq22;
+  jac_pose[gid * 14 + 3] = c.jpx0 * Jq03 + c.jpx2 * Jq23;
+  jac_pose[gid * 14 + 4] = c.jpx0;
+  jac_pose[gid * 14 + 5] = 0.0f;
+  jac_pose[gid * 14 + 6] = c.jpx2;
+  jac_pose[gid * 14 + 7] = c.jpy1 * Jq10 + c.jpy2 * Jq20;
+  jac_pose[gid * 14 + 8] = c.jpy1 * Jq11 + c.jpy2 * Jq21;
+  jac_pose[gid * 14 + 9] = c.jpy1 * Jq12 + c.jpy2 * Jq22;
+  jac_pose[gid * 14 + 10] = c.jpy1 * Jq13 + c.jpy2 * Jq23;
+  jac_pose[gid * 14 + 11] = 0.0f;
+  jac_pose[gid * 14 + 12] = c.jpy1;
+  jac_pose[gid * 14 + 13] = c.jpy2;
 
   // J_cam (2x4): d residual / d (f1, f2, c1, c2).
-  jac_cam[gid * 8 + 0] = u * inv_w;
+  jac_cam[gid * 8 + 0] = c.u * c.inv_w;
   jac_cam[gid * 8 + 1] = 0.0f;
   jac_cam[gid * 8 + 2] = 1.0f;
   jac_cam[gid * 8 + 3] = 0.0f;
   jac_cam[gid * 8 + 4] = 0.0f;
-  jac_cam[gid * 8 + 5] = v * inv_w;
+  jac_cam[gid * 8 + 5] = c.v * c.inv_w;
   jac_cam[gid * 8 + 6] = 0.0f;
   jac_cam[gid * 8 + 7] = 1.0f;
 }
@@ -170,47 +189,33 @@ static bool ReprojPointJac(float qx, float qy, float qz, float qw,
                            float f1, float f2, float c1, float c2,
                            float X, float Y, float Z, float ox, float oy,
                            thread float* r, thread float* J) {
-  const float vxp0 = qy * Z - qz * Y;
-  const float vxp1 = qz * X - qx * Z;
-  const float vxp2 = qx * Y - qy * X;
-  const float vvxp0 = qy * vxp2 - qz * vxp1;
-  const float vvxp1 = qz * vxp0 - qx * vxp2;
-  const float vvxp2 = qx * vxp1 - qy * vxp0;
-  const float u = X + 2.0f * (qw * vxp0 + vvxp0) + tx;
-  const float v = Y + 2.0f * (qw * vxp1 + vvxp1) + ty;
-  const float w = Z + 2.0f * (qw * vxp2 + vvxp2) + tz;
-  if (w <= 1e-6f) return false;
-  const float inv_w = 1.0f / w;
-  const float inv_w2 = inv_w * inv_w;
-  r[0] = f1 * u * inv_w + c1 - ox;
-  r[1] = f2 * v * inv_w + c2 - oy;
-
-  const float jpx0 = f1 * inv_w, jpx2 = -f1 * u * inv_w2;
-  const float jpy1 = f2 * inv_w, jpy2 = -f2 * v * inv_w2;
-  const float M00 = 1.0f - 2.0f * (qy * qy + qz * qz);
-  const float M01 = 2.0f * (qx * qy - qw * qz);
-  const float M02 = 2.0f * (qx * qz + qw * qy);
-  const float M10 = 2.0f * (qx * qy + qw * qz);
-  const float M11 = 1.0f - 2.0f * (qx * qx + qz * qz);
-  const float M12 = 2.0f * (qy * qz - qw * qx);
-  const float M20 = 2.0f * (qx * qz - qw * qy);
-  const float M21 = 2.0f * (qy * qz + qw * qx);
-  const float M22 = 1.0f - 2.0f * (qx * qx + qy * qy);
-  J[0] = jpx0 * M00 + jpx2 * M20;
-  J[1] = jpx0 * M01 + jpx2 * M21;
-  J[2] = jpx0 * M02 + jpx2 * M22;
-  J[3] = jpy1 * M10 + jpy2 * M20;
-  J[4] = jpy1 * M11 + jpy2 * M21;
-  J[5] = jpy1 * M12 + jpy2 * M22;
+  const ReprojCore c = ComputeReprojCore(qx, qy, qz, qw, tx, ty, tz, f1, f2, c1,
+                                         c2, X, Y, Z, ox, oy);
+  if (!c.valid) return false;
+  r[0] = c.r0;
+  r[1] = c.r1;
+  // J_point (2x3) = J_proj * M.
+  J[0] = c.jpx0 * c.M[0] + c.jpx2 * c.M[6];
+  J[1] = c.jpx0 * c.M[1] + c.jpx2 * c.M[7];
+  J[2] = c.jpx0 * c.M[2] + c.jpx2 * c.M[8];
+  J[3] = c.jpy1 * c.M[3] + c.jpy2 * c.M[6];
+  J[4] = c.jpy1 * c.M[4] + c.jpy2 * c.M[7];
+  J[5] = c.jpy1 * c.M[5] + c.jpy2 * c.M[8];
   return true;
 }
 
 // Sum of squared reprojection residuals of point (X,Y,Z) over its observations.
+// An observation that falls at/behind the camera (cheirality violation) is
+// charged a large fixed penalty rather than skipped, so an LM trial that pushes
+// the point behind its cameras strictly INCREASES the cost and is rejected --
+// without this, such a trial would score 0 and be wrongly accepted, committing
+// a point behind the cameras.
 static float PointCost(uint begin, uint end,
                        device const float* obs_pose,
                        device const float* obs_cam,
                        device const float* obs_pixel,
                        float X, float Y, float Z) {
+  constexpr float kCheiralityPenalty = 1e12f;
   float cost = 0.0f;
   float r[2], J[6];
   for (uint o = begin; o < end; ++o) {
@@ -222,6 +227,8 @@ static float PointCost(uint begin, uint end,
                        obs_cam[o * 4 + 3], X, Y, Z, obs_pixel[o * 2 + 0],
                        obs_pixel[o * 2 + 1], r, J)) {
       cost += r[0] * r[0] + r[1] * r[1];
+    } else {
+      cost += kCheiralityPenalty;
     }
   }
   return cost;
@@ -275,10 +282,14 @@ kernel void refine_points_pinhole(constant uint& num_points  [[buffer(0)]],
 
     bool accepted = false;
     for (int tries = 0; tries < 6 && !accepted; ++tries) {
-      // A = H + lambda * diag(H)  (Levenberg-Marquardt, Jacobi scaling).
-      const float a00 = h00 + lambda * h00;
-      const float a11 = h11 + lambda * h11;
-      const float a22 = h22 + lambda * h22;
+      // A = H + lambda * max(diag(H), floor) (Levenberg-Marquardt with Jacobi
+      // scaling). The floor keeps damping effective even when a Hessian diagonal
+      // is ~0 (a structurally unconstrained direction); pure relative scaling
+      // h_ii + lambda*h_ii would stay singular there for every lambda.
+      constexpr float kDiagFloor = 1e-9f;
+      const float a00 = h00 + lambda * max(h00, kDiagFloor);
+      const float a11 = h11 + lambda * max(h11, kDiagFloor);
+      const float a22 = h22 + lambda * max(h22, kDiagFloor);
       const float a01 = h01, a02 = h02, a12 = h12;
       // Symmetric 3x3 inverse via cofactors; solve A dx = -g.
       const float co00 = a11 * a22 - a12 * a12;
@@ -331,76 +342,61 @@ kernel void pose_tangent_jac_pinhole(constant uint& num_obs   [[buffer(0)]],
   if (gid >= num_obs) return;
   const float qx = poses[gid * 7 + 0], qy = poses[gid * 7 + 1];
   const float qz = poses[gid * 7 + 2], qw = poses[gid * 7 + 3];
-  const float tx = poses[gid * 7 + 4], ty = poses[gid * 7 + 5];
-  const float tz = poses[gid * 7 + 6];
   const float X = points[gid * 3 + 0], Y = points[gid * 3 + 1];
   const float Z = points[gid * 3 + 2];
-  const float f1 = cams[gid * 4 + 0], f2 = cams[gid * 4 + 1];
-  const float c1 = cams[gid * 4 + 2], c2 = cams[gid * 4 + 3];
+  const ReprojCore c = ComputeReprojCore(
+      qx, qy, qz, qw, poses[gid * 7 + 4], poses[gid * 7 + 5],
+      poses[gid * 7 + 6], cams[gid * 4 + 0], cams[gid * 4 + 1],
+      cams[gid * 4 + 2], cams[gid * 4 + 3], X, Y, Z, obs[gid * 2 + 0],
+      obs[gid * 2 + 1]);
+  residuals[gid * 2 + 0] = c.r0;
+  residuals[gid * 2 + 1] = c.r1;
+  if (!c.valid) {  // point at/behind camera: zero residual + Jacobian.
+    for (int k = 0; k < 6; ++k) jac_point[gid * 6 + k] = 0.0f;
+    for (int k = 0; k < 12; ++k) jac_cam_tangent[gid * 12 + k] = 0.0f;
+    return;
+  }
 
-  const float vxp0 = qy * Z - qz * Y;
-  const float vxp1 = qz * X - qx * Z;
-  const float vxp2 = qx * Y - qy * X;
-  const float u = X + 2.0f * (qw * vxp0 + (qy * vxp2 - qz * vxp1)) + tx;
-  const float v = Y + 2.0f * (qw * vxp1 + (qz * vxp0 - qx * vxp2)) + ty;
-  const float w = Z + 2.0f * (qw * vxp2 + (qx * vxp1 - qy * vxp0)) + tz;
-  const float inv_w = 1.0f / w;
-  const float inv_w2 = inv_w * inv_w;
-  residuals[gid * 2 + 0] = f1 * u * inv_w + c1 - obs[gid * 2 + 0];
-  residuals[gid * 2 + 1] = f2 * v * inv_w + c2 - obs[gid * 2 + 1];
-
-  const float jpx0 = f1 * inv_w, jpx2 = -f1 * u * inv_w2;
-  const float jpy1 = f2 * inv_w, jpy2 = -f2 * v * inv_w2;
-  const float M00 = 1.0f - 2.0f * (qy * qy + qz * qz);
-  const float M01 = 2.0f * (qx * qy - qw * qz);
-  const float M02 = 2.0f * (qx * qz + qw * qy);
-  const float M10 = 2.0f * (qx * qy + qw * qz);
-  const float M11 = 1.0f - 2.0f * (qx * qx + qz * qz);
-  const float M12 = 2.0f * (qy * qz - qw * qx);
-  const float M20 = 2.0f * (qx * qz - qw * qy);
-  const float M21 = 2.0f * (qy * qz + qw * qx);
-  const float M22 = 1.0f - 2.0f * (qx * qx + qy * qy);
-
-  // J_point = J_proj * R.
-  jac_point[gid * 6 + 0] = jpx0 * M00 + jpx2 * M20;
-  jac_point[gid * 6 + 1] = jpx0 * M01 + jpx2 * M21;
-  jac_point[gid * 6 + 2] = jpx0 * M02 + jpx2 * M22;
-  jac_point[gid * 6 + 3] = jpy1 * M10 + jpy2 * M20;
-  jac_point[gid * 6 + 4] = jpy1 * M11 + jpy2 * M21;
-  jac_point[gid * 6 + 5] = jpy1 * M12 + jpy2 * M22;
+  // J_point = J_proj * M.
+  jac_point[gid * 6 + 0] = c.jpx0 * c.M[0] + c.jpx2 * c.M[6];
+  jac_point[gid * 6 + 1] = c.jpx0 * c.M[1] + c.jpx2 * c.M[7];
+  jac_point[gid * 6 + 2] = c.jpx0 * c.M[2] + c.jpx2 * c.M[8];
+  jac_point[gid * 6 + 3] = c.jpy1 * c.M[3] + c.jpy2 * c.M[6];
+  jac_point[gid * 6 + 4] = c.jpy1 * c.M[4] + c.jpy2 * c.M[7];
+  jac_point[gid * 6 + 5] = c.jpy1 * c.M[5] + c.jpy2 * c.M[8];
 
   // M*[X]x (3x3), then d p_cam/d dtheta = -(M*[X]x).
-  const float MX00 = M01 * Z - M02 * Y;
-  const float MX10 = M11 * Z - M12 * Y;
-  const float MX20 = M21 * Z - M22 * Y;
-  const float MX01 = -M00 * Z + M02 * X;
-  const float MX11 = -M10 * Z + M12 * X;
-  const float MX21 = -M20 * Z + M22 * X;
-  const float MX02 = M00 * Y - M01 * X;
-  const float MX12 = M10 * Y - M11 * X;
-  const float MX22 = M20 * Y - M21 * X;
+  const float MX00 = c.M[1] * Z - c.M[2] * Y;
+  const float MX10 = c.M[4] * Z - c.M[5] * Y;
+  const float MX20 = c.M[7] * Z - c.M[8] * Y;
+  const float MX01 = -c.M[0] * Z + c.M[2] * X;
+  const float MX11 = -c.M[3] * Z + c.M[5] * X;
+  const float MX21 = -c.M[6] * Z + c.M[8] * X;
+  const float MX02 = c.M[0] * Y - c.M[1] * X;
+  const float MX12 = c.M[3] * Y - c.M[4] * X;
+  const float MX22 = c.M[6] * Y - c.M[7] * X;
 
   // J_rot (2x3) = J_proj * (-(M*[X]x)).
-  const float jr00 = -(jpx0 * MX00 + jpx2 * MX20);
-  const float jr01 = -(jpx0 * MX01 + jpx2 * MX21);
-  const float jr02 = -(jpx0 * MX02 + jpx2 * MX22);
-  const float jr10 = -(jpy1 * MX10 + jpy2 * MX20);
-  const float jr11 = -(jpy1 * MX11 + jpy2 * MX21);
-  const float jr12 = -(jpy1 * MX12 + jpy2 * MX22);
+  const float jr00 = -(c.jpx0 * MX00 + c.jpx2 * MX20);
+  const float jr01 = -(c.jpx0 * MX01 + c.jpx2 * MX21);
+  const float jr02 = -(c.jpx0 * MX02 + c.jpx2 * MX22);
+  const float jr10 = -(c.jpy1 * MX10 + c.jpy2 * MX20);
+  const float jr11 = -(c.jpy1 * MX11 + c.jpy2 * MX21);
+  const float jr12 = -(c.jpy1 * MX12 + c.jpy2 * MX22);
 
   // jac_cam_tangent (2x6) = [J_rot (2x3) | J_trans (2x3) = J_proj].
   jac_cam_tangent[gid * 12 + 0] = jr00;
   jac_cam_tangent[gid * 12 + 1] = jr01;
   jac_cam_tangent[gid * 12 + 2] = jr02;
-  jac_cam_tangent[gid * 12 + 3] = jpx0;
+  jac_cam_tangent[gid * 12 + 3] = c.jpx0;
   jac_cam_tangent[gid * 12 + 4] = 0.0f;
-  jac_cam_tangent[gid * 12 + 5] = jpx2;
+  jac_cam_tangent[gid * 12 + 5] = c.jpx2;
   jac_cam_tangent[gid * 12 + 6] = jr10;
   jac_cam_tangent[gid * 12 + 7] = jr11;
   jac_cam_tangent[gid * 12 + 8] = jr12;
   jac_cam_tangent[gid * 12 + 9] = 0.0f;
-  jac_cam_tangent[gid * 12 + 10] = jpy1;
-  jac_cam_tangent[gid * 12 + 11] = jpy2;
+  jac_cam_tangent[gid * 12 + 10] = c.jpy1;
+  jac_cam_tangent[gid * 12 + 11] = c.jpy2;
 }
 )METAL";
 
@@ -453,6 +449,34 @@ MetalContext& GetContext() {
   return context;
 }
 
+// Shared unified-memory buffer creation + 1D dispatch, so the host wrappers
+// below don't each re-implement the same scaffolding.
+id<MTLBuffer> MakeInBuf(id<MTLDevice> device, const void* ptr, size_t bytes) {
+  return [device newBufferWithBytes:ptr
+                             length:bytes
+                            options:MTLResourceStorageModeShared];
+}
+id<MTLBuffer> MakeOutBuf(id<MTLDevice> device, size_t bytes) {
+  return [device newBufferWithLength:bytes
+                             options:MTLResourceStorageModeShared];
+}
+// Clamp the threadgroup size, dispatch `threads` threads, commit and block.
+// Returns false if the command buffer did not complete.
+bool Dispatch1DAndWait(id<MTLCommandBuffer> cmd,
+                       id<MTLComputeCommandEncoder> enc,
+                       id<MTLComputePipelineState> pipeline,
+                       NSUInteger threads) {
+  NSUInteger tg = pipeline.maxTotalThreadsPerThreadgroup;
+  if (tg > threads) tg = threads;
+  if (tg == 0) tg = 1;
+  [enc dispatchThreads:MTLSizeMake(threads, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+  return cmd.status == MTLCommandBufferStatusCompleted;
+}
+
 }  // namespace
 
 bool IsBundleAdjustmentMetalAvailable() { return GetContext().valid; }
@@ -475,23 +499,15 @@ bool ComputeReprojErrorMetalPinhole(int num_obs,
 
   @autoreleasepool {
     const NSUInteger n = static_cast<NSUInteger>(num_obs);
-    auto in_buf = [&](const void* ptr, size_t bytes) {
-      return [ctx.device newBufferWithBytes:ptr
-                                     length:bytes
-                                    options:MTLResourceStorageModeShared];
-    };
-    auto out_buf = [&](size_t bytes) {
-      return [ctx.device newBufferWithLength:bytes
-                                     options:MTLResourceStorageModeShared];
-    };
-    id<MTLBuffer> poses_buf = in_buf(poses, n * 7 * sizeof(float));
-    id<MTLBuffer> points_buf = in_buf(points, n * 3 * sizeof(float));
-    id<MTLBuffer> cams_buf = in_buf(cams, n * 4 * sizeof(float));
-    id<MTLBuffer> obs_buf = in_buf(obs, n * 2 * sizeof(float));
-    id<MTLBuffer> res_buf = out_buf(n * 2 * sizeof(float));
-    id<MTLBuffer> jp_buf = out_buf(n * 6 * sizeof(float));
-    id<MTLBuffer> jpose_buf = out_buf(n * 14 * sizeof(float));
-    id<MTLBuffer> jcam_buf = out_buf(n * 8 * sizeof(float));
+    id<MTLDevice> dev = ctx.device;
+    id<MTLBuffer> poses_buf = MakeInBuf(dev, poses, n * 7 * sizeof(float));
+    id<MTLBuffer> points_buf = MakeInBuf(dev, points, n * 3 * sizeof(float));
+    id<MTLBuffer> cams_buf = MakeInBuf(dev, cams, n * 4 * sizeof(float));
+    id<MTLBuffer> obs_buf = MakeInBuf(dev, obs, n * 2 * sizeof(float));
+    id<MTLBuffer> res_buf = MakeOutBuf(dev, n * 2 * sizeof(float));
+    id<MTLBuffer> jp_buf = MakeOutBuf(dev, n * 6 * sizeof(float));
+    id<MTLBuffer> jpose_buf = MakeOutBuf(dev, n * 14 * sizeof(float));
+    id<MTLBuffer> jcam_buf = MakeOutBuf(dev, n * 8 * sizeof(float));
     if (poses_buf == nil || points_buf == nil || cams_buf == nil ||
         obs_buf == nil || res_buf == nil || jp_buf == nil || jpose_buf == nil ||
         jcam_buf == nil) {
@@ -511,16 +527,7 @@ bool ComputeReprojErrorMetalPinhole(int num_obs,
     [enc setBuffer:jp_buf offset:0 atIndex:6];
     [enc setBuffer:jpose_buf offset:0 atIndex:7];
     [enc setBuffer:jcam_buf offset:0 atIndex:8];
-
-    NSUInteger tg = ctx.pipeline.maxTotalThreadsPerThreadgroup;
-    if (tg > n) tg = n;
-    if (tg == 0) tg = 1;
-    [enc dispatchThreads:MTLSizeMake(n, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    if (cmd.status != MTLCommandBufferStatusCompleted) return false;
+    if (!Dispatch1DAndWait(cmd, enc, ctx.pipeline, n)) return false;
 
     std::memcpy(residuals, [res_buf contents], n * 2 * sizeof(float));
     std::memcpy(jac_point, [jp_buf contents], n * 6 * sizeof(float));
@@ -548,17 +555,13 @@ bool RefinePointsMetalPinhole(int num_points,
   @autoreleasepool {
     const NSUInteger p = static_cast<NSUInteger>(num_points);
     const NSUInteger m = static_cast<NSUInteger>(num_obs);
-    auto in_buf = [&](const void* ptr, size_t bytes) {
-      return [ctx.device newBufferWithBytes:ptr
-                                     length:bytes
-                                    options:MTLResourceStorageModeShared];
-    };
+    id<MTLDevice> dev = ctx.device;
     // point3D is read-write (optimized in place).
-    id<MTLBuffer> pts_buf = in_buf(point3D, p * 3 * sizeof(float));
-    id<MTLBuffer> off_buf = in_buf(obs_offset, (p + 1) * sizeof(int));
-    id<MTLBuffer> pose_buf = in_buf(obs_pose, m * 7 * sizeof(float));
-    id<MTLBuffer> cam_buf = in_buf(obs_cam, m * 4 * sizeof(float));
-    id<MTLBuffer> pix_buf = in_buf(obs_pixel, m * 2 * sizeof(float));
+    id<MTLBuffer> pts_buf = MakeInBuf(dev, point3D, p * 3 * sizeof(float));
+    id<MTLBuffer> off_buf = MakeInBuf(dev, obs_offset, (p + 1) * sizeof(int));
+    id<MTLBuffer> pose_buf = MakeInBuf(dev, obs_pose, m * 7 * sizeof(float));
+    id<MTLBuffer> cam_buf = MakeInBuf(dev, obs_cam, m * 4 * sizeof(float));
+    id<MTLBuffer> pix_buf = MakeInBuf(dev, obs_pixel, m * 2 * sizeof(float));
     if (pts_buf == nil || off_buf == nil || pose_buf == nil || cam_buf == nil ||
         pix_buf == nil) {
       return false;
@@ -576,16 +579,7 @@ bool RefinePointsMetalPinhole(int num_points,
     [enc setBuffer:pose_buf offset:0 atIndex:4];
     [enc setBuffer:cam_buf offset:0 atIndex:5];
     [enc setBuffer:pix_buf offset:0 atIndex:6];
-
-    NSUInteger tg = ctx.points_pipeline.maxTotalThreadsPerThreadgroup;
-    if (tg > p) tg = p;
-    if (tg == 0) tg = 1;
-    [enc dispatchThreads:MTLSizeMake(p, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    if (cmd.status != MTLCommandBufferStatusCompleted) return false;
+    if (!Dispatch1DAndWait(cmd, enc, ctx.points_pipeline, p)) return false;
 
     std::memcpy(point3D, [pts_buf contents], p * 3 * sizeof(float));
   }
@@ -608,22 +602,14 @@ bool ComputePoseTangentJacMetalPinhole(int num_obs,
   }
   @autoreleasepool {
     const NSUInteger n = static_cast<NSUInteger>(num_obs);
-    auto in_buf = [&](const void* ptr, size_t bytes) {
-      return [ctx.device newBufferWithBytes:ptr
-                                     length:bytes
-                                    options:MTLResourceStorageModeShared];
-    };
-    auto out_buf = [&](size_t bytes) {
-      return [ctx.device newBufferWithLength:bytes
-                                     options:MTLResourceStorageModeShared];
-    };
-    id<MTLBuffer> poses_buf = in_buf(poses, n * 7 * sizeof(float));
-    id<MTLBuffer> points_buf = in_buf(points, n * 3 * sizeof(float));
-    id<MTLBuffer> cams_buf = in_buf(cams, n * 4 * sizeof(float));
-    id<MTLBuffer> obs_buf = in_buf(obs, n * 2 * sizeof(float));
-    id<MTLBuffer> res_buf = out_buf(n * 2 * sizeof(float));
-    id<MTLBuffer> jct_buf = out_buf(n * 12 * sizeof(float));
-    id<MTLBuffer> jp_buf = out_buf(n * 6 * sizeof(float));
+    id<MTLDevice> dev = ctx.device;
+    id<MTLBuffer> poses_buf = MakeInBuf(dev, poses, n * 7 * sizeof(float));
+    id<MTLBuffer> points_buf = MakeInBuf(dev, points, n * 3 * sizeof(float));
+    id<MTLBuffer> cams_buf = MakeInBuf(dev, cams, n * 4 * sizeof(float));
+    id<MTLBuffer> obs_buf = MakeInBuf(dev, obs, n * 2 * sizeof(float));
+    id<MTLBuffer> res_buf = MakeOutBuf(dev, n * 2 * sizeof(float));
+    id<MTLBuffer> jct_buf = MakeOutBuf(dev, n * 12 * sizeof(float));
+    id<MTLBuffer> jp_buf = MakeOutBuf(dev, n * 6 * sizeof(float));
     if (poses_buf == nil || points_buf == nil || cams_buf == nil ||
         obs_buf == nil || res_buf == nil || jct_buf == nil || jp_buf == nil) {
       return false;
@@ -640,15 +626,7 @@ bool ComputePoseTangentJacMetalPinhole(int num_obs,
     [enc setBuffer:res_buf offset:0 atIndex:5];
     [enc setBuffer:jct_buf offset:0 atIndex:6];
     [enc setBuffer:jp_buf offset:0 atIndex:7];
-    NSUInteger tg = ctx.tangent_pipeline.maxTotalThreadsPerThreadgroup;
-    if (tg > n) tg = n;
-    if (tg == 0) tg = 1;
-    [enc dispatchThreads:MTLSizeMake(n, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    if (cmd.status != MTLCommandBufferStatusCompleted) return false;
+    if (!Dispatch1DAndWait(cmd, enc, ctx.tangent_pipeline, n)) return false;
     std::memcpy(residuals, [res_buf contents], n * 2 * sizeof(float));
     std::memcpy(jac_cam_tangent, [jct_buf contents], n * 12 * sizeof(float));
     std::memcpy(jac_point, [jp_buf contents], n * 6 * sizeof(float));

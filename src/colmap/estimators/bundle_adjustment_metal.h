@@ -41,6 +41,22 @@
 // The interface is free of Metal/Objective-C types so it is includable from any
 // translation unit; the implementation lives in bundle_adjustment_metal.mm
 // (compiled only under COLMAP_METAL_ENABLED), with a stub otherwise.
+//
+// STATUS / LIMITATIONS (read before using):
+//   * EXPERIMENTAL, research-only. These functions are NOT wired into COLMAP's
+//     BA pipeline (bundle_adjustment.cc never calls them); nothing in the
+//     product dispatches here. The end-to-end solver that ties them together
+//     (Schur/Power-BA LM) currently lives only in bundle_adjustment_metal_test
+//     and is not exposed as a callable library entry point. Decision on the
+//     caspar-style branch: equivalent output to Ceres is proven, no speed win is
+//     demonstrated, so this stays out of production (Ceres remains the BA).
+//   * Pinhole model only, INTRINSICS FIXED, NO robust loss (raw squared error).
+//     Real COLMAP BA handles distorted models, refines intrinsics, and uses a
+//     robust loss by default -- so equivalence to Ceres holds on clean data but
+//     would diverge on real data with outliers / other camera models.
+//   * fp32 throughout (matches the CUDA Caspar f32 path); adequate on the
+//     validated problems but an implicit ceiling on ill-conditioned/large
+//     scenes where Ceres' fp64 keeps precision this loses.
 
 #include <cstddef>
 

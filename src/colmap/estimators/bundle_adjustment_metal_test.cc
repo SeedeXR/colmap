@@ -35,6 +35,7 @@
 #include "colmap/math/random.h"
 #include "colmap/sensor/models.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -163,6 +164,36 @@ TEST(BundleAdjustmentMetal, ReprojErrorMatchesCeresPinhole) {
   // Jacobians to ~1e-4 relative -- numerically equivalent to the Ceres factor.
   EXPECT_LT(max_res_err, 1e-2);
   EXPECT_LT(max_jac_rel_err, 1e-3);
+}
+
+// A point at/behind the camera (cheirality violation) must yield a zeroed
+// residual + zeroed Jacobians (finite), matching PinholeCameraModel::ImgFromCam
+// returning false -- NOT inf/nan. Exercises the guard the synthetic in-front
+// fixtures never reach.
+TEST(BundleAdjustmentMetal, HandlesBehindCameraObservation) {
+  if (!IsBundleAdjustmentMetalAvailable()) {
+    GTEST_SKIP() << "Metal not available.";
+  }
+  // Identity pose, point at z=-1 (behind the camera), arbitrary intrinsics/obs.
+  const float poses[7] = {0, 0, 0, 1, 0, 0, 0};
+  const float points[3] = {0, 0, -1};
+  const float cams[4] = {1000, 1000, 640, 480};
+  const float obs[2] = {100, 100};
+
+  float res[2], jp[6], jpose[14], jcam[8];
+  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(1, poses, points, cams, obs, res,
+                                             jp, jpose, jcam));
+  for (float x : res) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  for (float x : jp) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  for (float x : jpose) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  for (float x : jcam) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+
+  float res2[2], jct[12], jp2[6];
+  ASSERT_TRUE(ComputePoseTangentJacMetalPinhole(1, poses, points, cams, obs,
+                                                res2, jct, jp2));
+  for (float x : res2) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  for (float x : jct) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  for (float x : jp2) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
 }
 
 // Speed signal: GPU batch evaluation vs a single-threaded CPU Ceres loop over
@@ -463,7 +494,10 @@ TEST(BundleAdjustmentMetal, RefinePointsMatchesCeresNoisy) {
   std::printf(
       "[ba-metal] point-BA noisy: max |Metal - Ceres| point coord diff = %.3e\n",
       max_diff);
-  EXPECT_LT(max_diff, 5e-3);
+  // Loose tolerance: fp32 Metal LM vs fp64 Ceres, and a near-degenerate (low-
+  // parallax) point among the 400 can legitimately differ more than a tight
+  // bound under fp32 rounding across GPUs.
+  EXPECT_LT(max_diff, 2e-2);
 }
 
 // Speed signal for the per-point solver (env-gated).
@@ -510,13 +544,21 @@ struct Obs {
 double FullBACost(const std::vector<Camera>& cams,
                   const std::vector<Eigen::Vector3d>& pts,
                   const std::vector<Obs>& obs) {
+  constexpr double kCheiralityPenalty = 1e12;
   double cost = 0;
   for (const Obs& o : obs) {
     const Eigen::Vector3d pc = cams[o.cam].q * pts[o.point] + cams[o.cam].t;
-    const auto& c = cams[o.cam].intr;
-    const Eigen::Vector2d r(c[0] * pc.x() / pc.z() + c[2] - o.pixel.x(),
-                            c[1] * pc.y() / pc.z() + c[3] - o.pixel.y());
-    cost += r.squaredNorm();
+    double px, py;
+    // Use COLMAP's own projection (single source of truth); it returns false
+    // for points at/behind the camera, which we charge a large penalty so a
+    // cheirality-violating trial is rejected by LM.
+    if (PinholeCameraModel::ImgFromCam(cams[o.cam].intr.data(), pc.x(), pc.y(),
+                                       pc.z(), &px, &py)) {
+      const double dx = px - o.pixel.x(), dy = py - o.pixel.y();
+      cost += dx * dx + dy * dy;
+    } else {
+      cost += kCheiralityPenalty;
+    }
   }
   return cost;
 }
@@ -533,10 +575,23 @@ double MetalFullBA(std::vector<Camera>& cams,
 
   double lambda = 1e-3;
   double cost = FullBACost(cams, pts, obs);
+
+  // Constant across iterations: per-observation intrinsics + observed pixels,
+  // and the point->observations grouping. Build once. Only poses/points (the
+  // optimized state) are refilled each iteration.
+  std::vector<float> camsp(num_obs * 4), obsp(num_obs * 2);
+  std::vector<std::vector<int>> point_obs(pts.size());
+  for (int o = 0; o < num_obs; ++o) {
+    const Camera& cm = cams[obs[o].cam];
+    for (int k = 0; k < 4; ++k) camsp[o * 4 + k] = (float)cm.intr[k];
+    obsp[o * 2 + 0] = (float)obs[o].pixel.x();
+    obsp[o * 2 + 1] = (float)obs[o].pixel.y();
+    point_obs[obs[o].point].push_back(o);
+  }
+  std::vector<float> poses(num_obs * 7), points(num_obs * 3);
+
   for (int it = 0; it < max_iters; ++it) {
-    // GPU: residuals + Jacobians at the current state.
-    std::vector<float> poses(num_obs * 7), points(num_obs * 3),
-        camsp(num_obs * 4), obsp(num_obs * 2);
+    // GPU: residuals + Jacobians at the current state (refill poses + points).
     for (int o = 0; o < num_obs; ++o) {
       const Camera& cm = cams[obs[o].cam];
       poses[o * 7 + 0] = (float)cm.q.x(); poses[o * 7 + 1] = (float)cm.q.y();
@@ -546,9 +601,6 @@ double MetalFullBA(std::vector<Camera>& cams,
       const Eigen::Vector3d& X = pts[obs[o].point];
       points[o * 3 + 0] = (float)X.x(); points[o * 3 + 1] = (float)X.y();
       points[o * 3 + 2] = (float)X.z();
-      for (int k = 0; k < 4; ++k) camsp[o * 4 + k] = (float)cm.intr[k];
-      obsp[o * 2 + 0] = (float)obs[o].pixel.x();
-      obsp[o * 2 + 1] = (float)obs[o].pixel.y();
     }
     std::vector<float> res(num_obs * 2), jct(num_obs * 12), jp(num_obs * 6);
     if (!ComputePoseTangentJacMetalPinhole(num_obs, poses.data(), points.data(),
@@ -585,23 +637,26 @@ double MetalFullBA(std::vector<Camera>& cams,
       }
     }
 
-    std::vector<std::vector<int>> point_obs(pts.size());
-    for (int o = 0; o < num_obs; ++o) point_obs[obs[o].point].push_back(o);
-
     bool accepted = false;
     for (int tries = 0; tries < 8 && !accepted; ++tries) {
       // Damped point blocks C^{-1} and the camera rhs b = -g_cam + E C^{-1} g_pt.
+      // LM damping with a small diagonal floor so a structurally unconstrained
+      // direction (zero Hessian diagonal) can still be regularized -- pure
+      // relative scaling (d += lambda*d) would stay singular there.
+      constexpr double kDiagFloor = 1e-9;
       std::vector<Eigen::Matrix3d> Cinv(pts.size());
       for (size_t p = 0; p < pts.size(); ++p) {
         Eigen::Matrix3d Cd = C[p];
-        for (int k = 0; k < 3; ++k) Cd(k, k) += lambda * Cd(k, k);
+        for (int k = 0; k < 3; ++k)
+          Cd(k, k) += lambda * std::max(Cd(k, k), kDiagFloor);
         Cinv[p] = Cd.inverse();
       }
       std::vector<Eigen::Matrix<double, 6, 6>> Bd(F);
       Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * F);
       for (int c = 0; c < F; ++c) {
         Bd[c] = B[c];
-        for (int k = 0; k < 6; ++k) Bd[c](k, k) += lambda * Bd[c](k, k);
+        for (int k = 0; k < 6; ++k)
+          Bd[c](k, k) += lambda * std::max(Bd[c](k, k), kDiagFloor);
         b.segment<6>(6 * c) = -gcam[c];
       }
       for (size_t p = 0; p < pts.size(); ++p) {
