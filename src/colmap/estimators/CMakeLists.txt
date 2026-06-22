@@ -56,6 +56,11 @@ if(CASPAR_ENABLED)
     )
 endif()
 
+# Caspar-style Metal bundle-adjustment PoC (Apple only). The Objective-C++
+# implementation compiles under METAL_ENABLED; otherwise a stub reports the
+# backend unavailable so callers use the Ceres CPU path.
+list(APPEND ESTIMATORS_SRCS bundle_adjustment_metal.h)
+
 COLMAP_ADD_LIBRARY(
     NAME colmap_estimators
     SRCS ${ESTIMATORS_SRCS}
@@ -79,6 +84,15 @@ if(CASPAR_ENABLED)
     target_link_libraries(colmap_estimators PUBLIC caspar_lib_core)
 endif()
 
+if(METAL_ENABLED AND APPLE)
+    target_sources(colmap_estimators PRIVATE bundle_adjustment_metal.mm)
+    set_source_files_properties(bundle_adjustment_metal.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(colmap_estimators PRIVATE ${COLMAP_METAL_FRAMEWORKS})
+else()
+    target_sources(colmap_estimators PRIVATE bundle_adjustment_metal_stub.cc)
+endif()
+
 if(CUDA_ENABLED)
     target_link_libraries(colmap_estimators PUBLIC colmap_util_cuda)
 endif()
@@ -96,6 +110,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME bundle_adjustment_ceres_test
     SRCS bundle_adjustment_ceres_test.cc
+    LINK_LIBS colmap_estimators
+)
+COLMAP_ADD_TEST(
+    NAME bundle_adjustment_metal_test
+    SRCS bundle_adjustment_metal_test.cc
     LINK_LIBS colmap_estimators
 )
 if(CASPAR_ENABLED)
