@@ -58,3 +58,6 @@ memory/
 datasets/
 golden_task/
 .zed/
+
+# Local build artifacts (binary + generated docs)
+output/

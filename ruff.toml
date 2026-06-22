@@ -19,3 +19,4 @@ ignore = ["SIM117"]
 
 [lint.per-file-ignores]
 "scripts/python/*.py" = ["E", "SIM", "UP", "B"]
+"scripts/macos/*.py" = ["E", "SIM", "UP", "B"]
