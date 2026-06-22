@@ -168,3 +168,30 @@ macro(COLMAP_ADD_TEST)
         target_compile_definitions(${COLMAP_ADD_TEST_TARGET} PRIVATE ${COLMAP_COMPILE_DEFINITIONS})
     endif()
 endmacro(COLMAP_ADD_TEST)
+
+# Add the Metal (Apple GPU) sources for a backend to an existing target,
+# centralizing the wiring shared by the mvs and estimators Metal backends.
+# Usage:
+#   COLMAP_ADD_METAL_SOURCES(<target>
+#       MM     <file.mm>      # Obj-C++ source, compiled with -fobjc-arc
+#       [EXTRA <src>...]      # extra sources compiled only in the Metal branch
+#       STUB   <file.cc>)     # source compiled when Metal is unavailable
+# On an Apple METAL_ENABLED build it adds MM (+ EXTRA) with ARC and links the
+# Metal frameworks; otherwise it adds STUB so the backend's symbols still exist.
+# Expanded in the caller's directory so set_source_files_properties applies in
+# the right scope.
+macro(COLMAP_ADD_METAL_SOURCES COLMAP_METAL_TARGET)
+    set(options)
+    set(oneValueArgs MM STUB)
+    set(multiValueArgs EXTRA)
+    cmake_parse_arguments(COLMAP_METAL "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    if(METAL_ENABLED AND APPLE)
+        target_sources(${COLMAP_METAL_TARGET} PRIVATE
+            ${COLMAP_METAL_MM} ${COLMAP_METAL_EXTRA})
+        set_source_files_properties(${COLMAP_METAL_MM} PROPERTIES
+            COMPILE_FLAGS "-fobjc-arc")
+        target_link_libraries(${COLMAP_METAL_TARGET} PRIVATE ${COLMAP_METAL_FRAMEWORKS})
+    else()
+        target_sources(${COLMAP_METAL_TARGET} PRIVATE ${COLMAP_METAL_STUB})
+    endif()
+endmacro(COLMAP_ADD_METAL_SOURCES)

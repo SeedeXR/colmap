@@ -27,8 +27,13 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-// Non-Metal stub: reports the Metal BA backend as unavailable so callers fall
-// back to the Ceres CPU path. Compiled when COLMAP_METAL_ENABLED is not set.
+// Non-Metal stub: every entry point reports the Metal BA backend as
+// unavailable (returns false). Built in place of bundle_adjustment_metal.mm
+// only when the BA_METAL_POC_ENABLED build option is ON but Metal is
+// unavailable (non-Apple, or METAL_ENABLED OFF); it exists so the PoC's parity
+// test still links and skips. With BA_METAL_POC_ENABLED OFF (the default) the
+// entire PoC -- including this stub -- is omitted from the build. See
+// BA_METAL_POC_ENABLED in the root CMakeLists.
 
 #include "colmap/estimators/bundle_adjustment_metal.h"
 

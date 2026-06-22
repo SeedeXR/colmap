@@ -39,8 +39,11 @@
 // (every dataset/camera uses it), so a positive result generalizes.
 //
 // The interface is free of Metal/Objective-C types so it is includable from any
-// translation unit; the implementation lives in bundle_adjustment_metal.mm
-// (compiled only under COLMAP_METAL_ENABLED), with a stub otherwise.
+// translation unit; the implementation lives in bundle_adjustment_metal.mm,
+// compiled on an Apple COLMAP_METAL_ENABLED build (stub otherwise) -- and only
+// when the build opts in via the CMake option BA_METAL_POC_ENABLED (default
+// OFF). A normal build, including a normal Apple Metal build, does not compile
+// this PoC or its test at all.
 //
 // STATUS / LIMITATIONS (read before using):
 //   * EXPERIMENTAL, research-only. These functions are NOT wired into COLMAP's
@@ -48,8 +51,8 @@
 //     product dispatches here. The end-to-end solver that ties them together
 //     (Schur/Power-BA LM) currently lives only in bundle_adjustment_metal_test
 //     and is not exposed as a callable library entry point. Decision on the
-//     caspar-style branch: equivalent output to Ceres is proven, no speed win is
-//     demonstrated, so this stays out of production (Ceres remains the BA).
+//     caspar-style branch: equivalent output to Ceres is proven, no speed win
+//     is demonstrated, so this stays out of production (Ceres remains the BA).
 //   * Pinhole model only, INTRINSICS FIXED, NO robust loss (raw squared error).
 //     Real COLMAP BA handles distorted models, refines intrinsics, and uses a
 //     robust loss by default -- so equivalence to Ceres holds on clean data but
@@ -57,6 +60,12 @@
 //   * fp32 throughout (matches the CUDA Caspar f32 path); adequate on the
 //     validated problems but an implicit ceiling on ill-conditioned/large
 //     scenes where Ceres' fp64 keeps precision this loses.
+//   * Each call is stateless: it allocates fresh (shared) MTLBuffers and copies
+//     inputs in / outputs out. An iterative caller (e.g. the LM solver in the
+//     test) therefore reallocates per iteration even for inputs that do not
+//     change. A production design would keep persistent shared buffers and
+//     write in place; that is intentionally NOT done here -- this PoC measures
+//     batched factor-evaluation throughput, not end-to-end solver wall-time.
 
 #include <cstddef>
 
@@ -80,9 +89,9 @@ bool IsBundleAdjustmentMetalAvailable();
 //   obs    [2*N]: observed pixel (x, y)
 // Outputs (caller-allocated):
 //   residuals [2*N]
-//   jac_point [6*N] : 2x3 row-major,  d residual / d point3D_in_world
-//   jac_pose  [14*N]: 2x7 row-major,  d residual / d cam_from_world (quat|trans)
-//   jac_cam   [8*N] : 2x4 row-major,  d residual / d camera_params
+//   jac_point [6*N] : 2x3 row-major, d residual / d point3D_in_world
+//   jac_pose  [14*N]: 2x7 row-major, d residual / d cam_from_world (quat|trans)
+//   jac_cam   [8*N] : 2x4 row-major, d residual / d camera_params
 // The Jacobian block order matches the ReprojErrorCostFunctor parameter order
 // (point3D_in_world, cam_from_world, camera_params). Returns false if Metal is
 // unavailable or inputs are invalid.
@@ -96,16 +105,17 @@ bool ComputeReprojErrorMetalPinhole(int num_obs,
                                     float* jac_pose,
                                     float* jac_cam);
 
-// Structure-only (point) bundle adjustment on the Metal GPU: with cameras fixed,
-// refine each 3D point by Levenberg-Marquardt minimizing its reprojection error
-// over the observations that see it (Pinhole model). One GPU thread per point --
-// the points are independent (no shared state, no manifold; points are
-// Euclidean), so this is the embarrassingly-parallel structure half of BA and
-// the per-point C-block that a Schur/Power-BA camera solver eliminates.
+// Structure-only (point) bundle adjustment on the Metal GPU: with cameras
+// fixed, refine each 3D point by Levenberg-Marquardt minimizing its
+// reprojection error over the observations that see it (Pinhole model). One GPU
+// thread per point -- the points are independent (no shared state, no manifold;
+// points are Euclidean), so this is the embarrassingly-parallel structure half
+// of BA and the per-point C-block that a Schur/Power-BA camera solver
+// eliminates.
 //
 // Observations are stored CSR-style, grouped by point:
 //   point3D    [3*num_points] : INOUT, optimized in place (X,Y,Z world)
-//   obs_offset [num_points+1] : obs for point p are [obs_offset[p], obs_offset[p+1])
+//   obs_offset [num_points+1] : point p's obs span [obs_offset[p], offset[p+1])
 //   obs_pose   [7*num_obs]    : (qx,qy,qz,qw,tx,ty,tz) cam_from_world per obs
 //   obs_cam    [4*num_obs]    : (fx,fy,cx,cy) per obs
 //   obs_pixel  [2*num_obs]    : observed pixel (x,y) per obs

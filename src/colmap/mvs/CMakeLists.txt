@@ -68,15 +68,10 @@ endif()
 # Metal PatchMatch MVS compute core (Apple only). The real Objective-C++
 # implementation compiles under METAL_ENABLED; otherwise a stub reports the
 # backend as unavailable so callers use the CPU/CUDA path.
-if(METAL_ENABLED AND APPLE)
-    target_sources(colmap_mvs PRIVATE patch_match_metal.mm
-                                      patch_match_metal_controller.cc)
-    set_source_files_properties(patch_match_metal.mm PROPERTIES
-        COMPILE_FLAGS "-fobjc-arc")
-    target_link_libraries(colmap_mvs PRIVATE ${COLMAP_METAL_FRAMEWORKS})
-else()
-    target_sources(colmap_mvs PRIVATE patch_match_metal_stub.cc)
-endif()
+COLMAP_ADD_METAL_SOURCES(colmap_mvs
+    MM patch_match_metal.mm
+    EXTRA patch_match_metal_controller.cc
+    STUB patch_match_metal_stub.cc)
 
 COLMAP_ADD_TEST(
     NAME consistency_graph_test

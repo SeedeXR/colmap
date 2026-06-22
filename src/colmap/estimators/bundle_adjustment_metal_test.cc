@@ -56,7 +56,7 @@ namespace {
 // camera, pinhole intrinsics, observed pixel) into the flat fp32 layout the
 // Metal kernel consumes, and keeps a double copy for the Ceres reference.
 struct ReprojData {
-  std::vector<float> poses, points, cams, obs;       // fp32 for the kernel.
+  std::vector<float> poses, points, cams, obs;  // fp32 for the kernel.
   std::vector<std::array<double, 7>> poses_d;
   std::vector<std::array<double, 3>> points_d;
   std::vector<std::array<double, 4>> cams_d;
@@ -98,14 +98,21 @@ ReprojData MakeRandomData(int n) {
                                        RandomUniformReal<double>(300, 700)};
     // Observed pixel = true projection + small noise.
     double px, py;
-    PinholeCameraModel::ImgFromCam(cam.data(), point_in_cam.x(),
-                                   point_in_cam.y(), point_in_cam.z(), &px, &py);
+    PinholeCameraModel::ImgFromCam(cam.data(),
+                                   point_in_cam.x(),
+                                   point_in_cam.y(),
+                                   point_in_cam.z(),
+                                   &px,
+                                   &py);
     const Eigen::Vector2d ob(px + RandomUniformReal<double>(-1, 1),
                              py + RandomUniformReal<double>(-1, 1));
 
-    d.poses_d[i] = {cam_from_world.params[0], cam_from_world.params[1],
-                    cam_from_world.params[2], cam_from_world.params[3],
-                    cam_from_world.params[4], cam_from_world.params[5],
+    d.poses_d[i] = {cam_from_world.params[0],
+                    cam_from_world.params[1],
+                    cam_from_world.params[2],
+                    cam_from_world.params[3],
+                    cam_from_world.params[4],
+                    cam_from_world.params[5],
                     cam_from_world.params[6]};
     d.points_d[i] = {point3D.x(), point3D.y(), point3D.z()};
     d.cams_d[i] = cam;
@@ -130,27 +137,33 @@ TEST(BundleAdjustmentMetal, ReprojErrorMatchesCeresPinhole) {
   ReprojData d = MakeRandomData(kN);
 
   std::vector<float> res(kN * 2), jp(kN * 6), jpose(kN * 14), jcam(kN * 8);
-  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(kN, d.poses.data(), d.points.data(),
-                                             d.cams.data(), d.obs.data(),
-                                             res.data(), jp.data(), jpose.data(),
+  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(kN,
+                                             d.poses.data(),
+                                             d.points.data(),
+                                             d.cams.data(),
+                                             d.obs.data(),
+                                             res.data(),
+                                             jp.data(),
+                                             jpose.data(),
                                              jcam.data()));
 
   double max_res_err = 0, max_jac_rel_err = 0;
   for (int i = 0; i < kN; ++i) {
     std::unique_ptr<ceres::CostFunction> cost(
         ReprojErrorCostFunctor<PinholeCameraModel>::Create(d.obs_d[i]));
-    const double* params[3] = {d.points_d[i].data(), d.poses_d[i].data(),
-                               d.cams_d[i].data()};
+    const double* params[3] = {
+        d.points_d[i].data(), d.poses_d[i].data(), d.cams_d[i].data()};
     double ref_res[2];
     double ref_jp[6], ref_jpose[14], ref_jcam[8];
     double* jacs[3] = {ref_jp, ref_jpose, ref_jcam};
     ASSERT_TRUE(cost->Evaluate(params, ref_res, jacs));
 
     for (int k = 0; k < 2; ++k)
-      max_res_err = std::max(max_res_err, std::abs(res[i * 2 + k] - ref_res[k]));
+      max_res_err =
+          std::max(max_res_err, std::abs(res[i * 2 + k] - ref_res[k]));
     auto rel = [&](float gpu, double ref) {
-      max_jac_rel_err =
-          std::max(max_jac_rel_err, std::abs(gpu - ref) / (std::abs(ref) + 1.0));
+      max_jac_rel_err = std::max(max_jac_rel_err,
+                                 std::abs(gpu - ref) / (std::abs(ref) + 1.0));
     };
     for (int k = 0; k < 6; ++k) rel(jp[i * 6 + k], ref_jp[k]);
     for (int k = 0; k < 14; ++k) rel(jpose[i * 14 + k], ref_jpose[k]);
@@ -159,7 +172,9 @@ TEST(BundleAdjustmentMetal, ReprojErrorMatchesCeresPinhole) {
 
   std::printf(
       "[ba-metal] N=%d  max residual abs err=%.3e px  max jac rel err=%.3e\n",
-      kN, max_res_err, max_jac_rel_err);
+      kN,
+      max_res_err,
+      max_jac_rel_err);
   // fp32 over the reprojection chain: residuals match to well under 0.01 px and
   // Jacobians to ~1e-4 relative -- numerically equivalent to the Ceres factor.
   EXPECT_LT(max_res_err, 1e-2);
@@ -181,19 +196,40 @@ TEST(BundleAdjustmentMetal, HandlesBehindCameraObservation) {
   const float obs[2] = {100, 100};
 
   float res[2], jp[6], jpose[14], jcam[8];
-  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(1, poses, points, cams, obs, res,
-                                             jp, jpose, jcam));
-  for (float x : res) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
-  for (float x : jp) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
-  for (float x : jpose) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
-  for (float x : jcam) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(
+      1, poses, points, cams, obs, res, jp, jpose, jcam));
+  for (float x : res) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
+  for (float x : jp) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
+  for (float x : jpose) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
+  for (float x : jcam) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
 
   float res2[2], jct[12], jp2[6];
-  ASSERT_TRUE(ComputePoseTangentJacMetalPinhole(1, poses, points, cams, obs,
-                                                res2, jct, jp2));
-  for (float x : res2) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
-  for (float x : jct) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
-  for (float x : jp2) { EXPECT_TRUE(std::isfinite(x)); EXPECT_EQ(x, 0.0f); }
+  ASSERT_TRUE(ComputePoseTangentJacMetalPinhole(
+      1, poses, points, cams, obs, res2, jct, jp2));
+  for (float x : res2) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
+  for (float x : jct) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
+  for (float x : jp2) {
+    EXPECT_TRUE(std::isfinite(x));
+    EXPECT_EQ(x, 0.0f);
+  }
 }
 
 // Speed signal: GPU batch evaluation vs a single-threaded CPU Ceres loop over
@@ -212,13 +248,25 @@ TEST(BundleAdjustmentMetal, ReprojErrorThroughputSignal) {
   std::vector<float> res(kN * 2), jp(kN * 6), jpose(kN * 14), jcam(kN * 8);
 
   // Warm up (compile/allocate) then time the GPU batch.
-  ComputeReprojErrorMetalPinhole(1, d.poses.data(), d.points.data(),
-                                 d.cams.data(), d.obs.data(), res.data(),
-                                 jp.data(), jpose.data(), jcam.data());
+  ComputeReprojErrorMetalPinhole(1,
+                                 d.poses.data(),
+                                 d.points.data(),
+                                 d.cams.data(),
+                                 d.obs.data(),
+                                 res.data(),
+                                 jp.data(),
+                                 jpose.data(),
+                                 jcam.data());
   auto t0 = std::chrono::steady_clock::now();
-  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(
-      kN, d.poses.data(), d.points.data(), d.cams.data(), d.obs.data(),
-      res.data(), jp.data(), jpose.data(), jcam.data()));
+  ASSERT_TRUE(ComputeReprojErrorMetalPinhole(kN,
+                                             d.poses.data(),
+                                             d.points.data(),
+                                             d.cams.data(),
+                                             d.obs.data(),
+                                             res.data(),
+                                             jp.data(),
+                                             jpose.data(),
+                                             jcam.data()));
   auto t1 = std::chrono::steady_clock::now();
   const double gpu_ms =
       std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -231,13 +279,14 @@ TEST(BundleAdjustmentMetal, ReprojErrorThroughputSignal) {
   // ratio; and evaluation is only part of BA (the Schur/PCG solve is separate).
   std::vector<std::unique_ptr<ceres::CostFunction>> costs(kN);
   for (int i = 0; i < kN; ++i) {
-    costs[i].reset(ReprojErrorCostFunctor<PinholeCameraModel>::Create(d.obs_d[i]));
+    costs[i].reset(
+        ReprojErrorCostFunctor<PinholeCameraModel>::Create(d.obs_d[i]));
   }
   std::vector<double> cres(kN * 2), cjp(kN * 6), cjpose(kN * 14), cjcam(kN * 8);
   auto c0 = std::chrono::steady_clock::now();
   for (int i = 0; i < kN; ++i) {
-    const double* params[3] = {d.points_d[i].data(), d.poses_d[i].data(),
-                               d.cams_d[i].data()};
+    const double* params[3] = {
+        d.points_d[i].data(), d.poses_d[i].data(), d.cams_d[i].data()};
     double* jacs[3] = {&cjp[i * 6], &cjpose[i * 14], &cjcam[i * 8]};
     costs[i]->Evaluate(params, &cres[i * 2], jacs);
   }
@@ -246,9 +295,13 @@ TEST(BundleAdjustmentMetal, ReprojErrorThroughputSignal) {
       std::chrono::duration<double, std::milli>(c1 - c0).count();
 
   std::printf(
-      "[ba-metal] %d obs residual+Jacobian: GPU %.1f ms, CPU(1-thread) %.1f ms, "
+      "[ba-metal] %d obs residual+Jacobian: GPU %.1f ms, CPU(1-thread) %.1f "
+      "ms, "
       "speedup %.1fx (GPU includes buffer alloc + copy back)\n",
-      kN, gpu_ms, cpu_ms, cpu_ms / gpu_ms);
+      kN,
+      gpu_ms,
+      cpu_ms,
+      cpu_ms / gpu_ms);
   SUCCEED();
 }
 
@@ -263,12 +316,18 @@ TEST(BundleAdjustmentMetal, PoseTangentJacobianMatchesFiniteDiff) {
   constexpr int kN = 512;
   ReprojData d = MakeRandomData(kN);
   std::vector<float> res(kN * 2), jct(kN * 12), jp(kN * 6);
-  ASSERT_TRUE(ComputePoseTangentJacMetalPinhole(
-      kN, d.poses.data(), d.points.data(), d.cams.data(), d.obs.data(),
-      res.data(), jct.data(), jp.data()));
+  ASSERT_TRUE(ComputePoseTangentJacMetalPinhole(kN,
+                                                d.poses.data(),
+                                                d.points.data(),
+                                                d.cams.data(),
+                                                d.obs.data(),
+                                                res.data(),
+                                                jct.data(),
+                                                jp.data()));
 
   auto residual = [](const std::array<double, 7>& pose,
-                     const Eigen::Vector3d& X, const std::array<double, 4>& cam,
+                     const Eigen::Vector3d& X,
+                     const std::array<double, 4>& cam,
                      const Eigen::Vector2d& ob) {
     const Eigen::Quaterniond q(pose[3], pose[0], pose[1], pose[2]);  // w,x,y,z
     const Eigen::Vector3d t(pose[4], pose[5], pose[6]);
@@ -280,15 +339,18 @@ TEST(BundleAdjustmentMetal, PoseTangentJacobianMatchesFiniteDiff) {
   double max_rel = 0;
   for (int i = 0; i < kN; ++i) {
     const auto& pose = d.poses_d[i];
-    const Eigen::Vector3d X(d.points_d[i][0], d.points_d[i][1], d.points_d[i][2]);
+    const Eigen::Vector3d X(
+        d.points_d[i][0], d.points_d[i][1], d.points_d[i][2]);
     const auto& cam = d.cams_d[i];
     const Eigen::Vector2d ob = d.obs_d[i];
     const Eigen::Quaterniond q(pose[3], pose[0], pose[1], pose[2]);
     const Eigen::Vector3d t(pose[4], pose[5], pose[6]);
 
     auto check = [&](const Eigen::Vector2d& num, double gpu0, double gpu1) {
-      max_rel = std::max(max_rel, std::abs(gpu0 - num.x()) / (std::abs(num.x()) + 1.0));
-      max_rel = std::max(max_rel, std::abs(gpu1 - num.y()) / (std::abs(num.y()) + 1.0));
+      max_rel = std::max(max_rel,
+                         std::abs(gpu0 - num.x()) / (std::abs(num.x()) + 1.0));
+      max_rel = std::max(max_rel,
+                         std::abs(gpu1 - num.y()) / (std::abs(num.y()) + 1.0));
     };
     // Rotation tangent columns 0..2.
     for (int a = 0; a < 3; ++a) {
@@ -298,12 +360,12 @@ TEST(BundleAdjustmentMetal, PoseTangentJacobianMatchesFiniteDiff) {
         return q * Eigen::Quaterniond(Eigen::AngleAxisd(s, axis));
       };
       auto pose_of = [&](const Eigen::Quaterniond& qq) {
-        return std::array<double, 7>{qq.x(), qq.y(), qq.z(), qq.w(),
-                                     t.x(), t.y(), t.z()};
+        return std::array<double, 7>{
+            qq.x(), qq.y(), qq.z(), qq.w(), t.x(), t.y(), t.z()};
       };
-      const Eigen::Vector2d num =
-          (residual(pose_of(qd(eps)), X, cam, ob) -
-           residual(pose_of(qd(-eps)), X, cam, ob)) / (2 * eps);
+      const Eigen::Vector2d num = (residual(pose_of(qd(eps)), X, cam, ob) -
+                                   residual(pose_of(qd(-eps)), X, cam, ob)) /
+                                  (2 * eps);
       check(num, jct[i * 12 + a], jct[i * 12 + 6 + a]);
     }
     // Translation tangent columns 3..5.
@@ -313,9 +375,9 @@ TEST(BundleAdjustmentMetal, PoseTangentJacobianMatchesFiniteDiff) {
         pp[4 + a] += s;
         return pp;
       };
-      const Eigen::Vector2d num =
-          (residual(pose_dt(eps), X, cam, ob) -
-           residual(pose_dt(-eps), X, cam, ob)) / (2 * eps);
+      const Eigen::Vector2d num = (residual(pose_dt(eps), X, cam, ob) -
+                                   residual(pose_dt(-eps), X, cam, ob)) /
+                                  (2 * eps);
       check(num, jct[i * 12 + 3 + a], jct[i * 12 + 6 + 3 + a]);
     }
     // Point columns 0..2.
@@ -328,8 +390,10 @@ TEST(BundleAdjustmentMetal, PoseTangentJacobianMatchesFiniteDiff) {
       check(num, jp[i * 6 + a], jp[i * 6 + 3 + a]);
     }
   }
-  std::printf("[ba-metal] pose-tangent+point Jacobian vs finite-diff: max rel "
-              "err=%.3e\n", max_rel);
+  std::printf(
+      "[ba-metal] pose-tangent+point Jacobian vs finite-diff: max rel "
+      "err=%.3e\n",
+      max_rel);
   EXPECT_LT(max_rel, 5e-3);
 }
 
@@ -340,9 +404,9 @@ TEST(BundleAdjustmentMetal, PoseTangentJacobianMatchesFiniteDiff) {
 struct PointBAData {
   int num_points = 0;
   int num_obs = 0;
-  std::vector<float> point3D;            // 3*P, perturbed initial guess (INOUT).
-  std::vector<double> point3D_true;      // 3*P ground truth.
-  std::vector<int> obs_offset;           // P+1.
+  std::vector<float> point3D;        // 3*P, perturbed initial guess (INOUT).
+  std::vector<double> point3D_true;  // 3*P ground truth.
+  std::vector<int> obs_offset;       // P+1.
   std::vector<float> obs_pose, obs_cam, obs_pixel;  // CSR fp32 for the kernel.
   std::vector<std::array<double, 7>> obs_pose_d;
   std::vector<std::array<double, 4>> obs_cam_d;
@@ -353,8 +417,8 @@ Rigid3d LookAt(const Eigen::Vector3d& eye) {
   const Eigen::Vector3d f = (-eye).normalized();  // +z optical axis -> scene.
   Eigen::Vector3d up(0, 1, 0);
   if (std::abs(f.dot(up)) > 0.9) up = Eigen::Vector3d(1, 0, 0);
-  const Eigen::Vector3d x = f.cross(up).normalized();   // +x right.
-  const Eigen::Vector3d y = f.cross(x);                 // +y down.
+  const Eigen::Vector3d x = f.cross(up).normalized();  // +x right.
+  const Eigen::Vector3d y = f.cross(x);                // +y down.
   Eigen::Matrix3d R_cw;
   R_cw.row(0) = x;
   R_cw.row(1) = y;
@@ -375,7 +439,9 @@ PointBAData MakePointBA(int num_points, int num_cameras, double pixel_noise) {
                               RandomUniformReal<double>(-1, 1));
     cams_from_world[c] = LookAt(eye.normalized() * 6.0);  // radius 6 sphere.
     intrinsics[c] = {RandomUniformReal<double>(900, 1100),
-                     RandomUniformReal<double>(900, 1100), 640.0, 480.0};
+                     RandomUniformReal<double>(900, 1100),
+                     640.0,
+                     480.0};
   }
 
   d.obs_offset.push_back(0);
@@ -396,13 +462,19 @@ PointBAData MakePointBA(int num_points, int num_cameras, double pixel_noise) {
       const Eigen::Vector3d pc = cams_from_world[c] * Xtrue;
       if (pc.z() <= 0.1) continue;
       double px, py;
-      PinholeCameraModel::ImgFromCam(intrinsics[c].data(), pc.x(), pc.y(),
-                                     pc.z(), &px, &py);
-      const Eigen::Vector2d pix(px + RandomUniformReal<double>(-1, 1) * pixel_noise,
-                                py + RandomUniformReal<double>(-1, 1) * pixel_noise);
+      PinholeCameraModel::ImgFromCam(
+          intrinsics[c].data(), pc.x(), pc.y(), pc.z(), &px, &py);
+      const Eigen::Vector2d pix(
+          px + RandomUniformReal<double>(-1, 1) * pixel_noise,
+          py + RandomUniformReal<double>(-1, 1) * pixel_noise);
       const auto& q = cams_from_world[c];
-      d.obs_pose_d.push_back({q.params[0], q.params[1], q.params[2], q.params[3],
-                              q.params[4], q.params[5], q.params[6]});
+      d.obs_pose_d.push_back({q.params[0],
+                              q.params[1],
+                              q.params[2],
+                              q.params[3],
+                              q.params[4],
+                              q.params[5],
+                              q.params[6]});
       d.obs_cam_d.push_back(intrinsics[c]);
       d.obs_pixel_d.push_back(pix);
       for (int k = 0; k < 7; ++k) d.obs_pose.push_back((float)q.params[k]);
@@ -431,16 +503,22 @@ TEST(BundleAdjustmentMetal, RefinePointsRecoversTruthNoiseFree) {
   if (!IsBundleAdjustmentMetalAvailable()) {
     GTEST_SKIP() << "Metal not available.";
   }
-  PointBAData d = MakePointBA(/*num_points=*/2000, /*num_cameras=*/8,
+  PointBAData d = MakePointBA(/*num_points=*/2000,
+                              /*num_cameras=*/8,
                               /*pixel_noise=*/0.0);
   const double init_err = MaxPointError(d.point3D, d.point3D_true);
-  ASSERT_TRUE(RefinePointsMetalPinhole(d.num_points, d.num_obs,
-                                       d.point3D.data(), d.obs_offset.data(),
-                                       d.obs_pose.data(), d.obs_cam.data(),
-                                       d.obs_pixel.data(), /*max_iters=*/30));
+  ASSERT_TRUE(RefinePointsMetalPinhole(d.num_points,
+                                       d.num_obs,
+                                       d.point3D.data(),
+                                       d.obs_offset.data(),
+                                       d.obs_pose.data(),
+                                       d.obs_cam.data(),
+                                       d.obs_pixel.data(),
+                                       /*max_iters=*/30));
   const double final_err = MaxPointError(d.point3D, d.point3D_true);
   std::printf("[ba-metal] point-BA noise-free: init max err %.3e -> %.3e\n",
-              init_err, final_err);
+              init_err,
+              final_err);
   EXPECT_LT(final_err, 1e-3);
 }
 
@@ -450,28 +528,35 @@ TEST(BundleAdjustmentMetal, RefinePointsMatchesCeresNoisy) {
   if (!IsBundleAdjustmentMetalAvailable()) {
     GTEST_SKIP() << "Metal not available.";
   }
-  PointBAData d = MakePointBA(/*num_points=*/400, /*num_cameras=*/8,
+  PointBAData d = MakePointBA(/*num_points=*/400,
+                              /*num_cameras=*/8,
                               /*pixel_noise=*/0.5);
 
   // Metal refine (in place on a copy).
   std::vector<float> metal_pts = d.point3D;
-  ASSERT_TRUE(RefinePointsMetalPinhole(d.num_points, d.num_obs,
-                                       metal_pts.data(), d.obs_offset.data(),
-                                       d.obs_pose.data(), d.obs_cam.data(),
-                                       d.obs_pixel.data(), /*max_iters=*/50));
+  ASSERT_TRUE(RefinePointsMetalPinhole(d.num_points,
+                                       d.num_obs,
+                                       metal_pts.data(),
+                                       d.obs_offset.data(),
+                                       d.obs_pose.data(),
+                                       d.obs_cam.data(),
+                                       d.obs_pixel.data(),
+                                       /*max_iters=*/50));
 
   // Ceres point-only BA: vary points, hold poses + intrinsics constant.
   std::vector<std::array<double, 3>> ceres_pts(d.num_points);
   for (int p = 0; p < d.num_points; ++p) {
-    ceres_pts[p] = {d.point3D[p * 3 + 0], d.point3D[p * 3 + 1],
-                    d.point3D[p * 3 + 2]};
+    ceres_pts[p] = {
+        d.point3D[p * 3 + 0], d.point3D[p * 3 + 1], d.point3D[p * 3 + 2]};
   }
   ceres::Problem problem;
   for (int p = 0; p < d.num_points; ++p) {
     for (int o = d.obs_offset[p]; o < d.obs_offset[p + 1]; ++o) {
       problem.AddResidualBlock(
           ReprojErrorCostFunctor<PinholeCameraModel>::Create(d.obs_pixel_d[o]),
-          nullptr, ceres_pts[p].data(), d.obs_pose_d[o].data(),
+          nullptr,
+          ceres_pts[p].data(),
+          d.obs_pose_d[o].data(),
           d.obs_cam_d[o].data());
       problem.SetParameterBlockConstant(d.obs_pose_d[o].data());
       problem.SetParameterBlockConstant(d.obs_cam_d[o].data());
@@ -492,7 +577,8 @@ TEST(BundleAdjustmentMetal, RefinePointsMatchesCeresNoisy) {
     }
   }
   std::printf(
-      "[ba-metal] point-BA noisy: max |Metal - Ceres| point coord diff = %.3e\n",
+      "[ba-metal] point-BA noisy: max |Metal - Ceres| point coord diff = "
+      "%.3e\n",
       max_diff);
   // Loose tolerance: fp32 Metal LM vs fp64 Ceres, and a near-degenerate (low-
   // parallax) point among the 400 can legitimately differ more than a tight
@@ -508,17 +594,23 @@ TEST(BundleAdjustmentMetal, RefinePointsThroughputSignal) {
   if (std::getenv("COLMAP_BA_METAL_BENCH") == nullptr) {
     GTEST_SKIP() << "set COLMAP_BA_METAL_BENCH=1 to run the throughput signal.";
   }
-  PointBAData d = MakePointBA(/*num_points=*/100000, /*num_cameras=*/8,
+  PointBAData d = MakePointBA(/*num_points=*/100000,
+                              /*num_cameras=*/8,
                               /*pixel_noise=*/0.5);
   std::vector<float> pts = d.point3D;
   auto t0 = std::chrono::steady_clock::now();
-  ASSERT_TRUE(RefinePointsMetalPinhole(d.num_points, d.num_obs, pts.data(),
-                                       d.obs_offset.data(), d.obs_pose.data(),
-                                       d.obs_cam.data(), d.obs_pixel.data(),
+  ASSERT_TRUE(RefinePointsMetalPinhole(d.num_points,
+                                       d.num_obs,
+                                       pts.data(),
+                                       d.obs_offset.data(),
+                                       d.obs_pose.data(),
+                                       d.obs_cam.data(),
+                                       d.obs_pixel.data(),
                                        /*max_iters=*/30));
   auto t1 = std::chrono::steady_clock::now();
   std::printf("[ba-metal] point-BA: %d points / %d obs refined in %.1f ms\n",
-              d.num_points, d.num_obs,
+              d.num_points,
+              d.num_obs,
               std::chrono::duration<double, std::milli>(t1 - t0).count());
   SUCCEED();
 }
@@ -552,8 +644,8 @@ double FullBACost(const std::vector<Camera>& cams,
     // Use COLMAP's own projection (single source of truth); it returns false
     // for points at/behind the camera, which we charge a large penalty so a
     // cheirality-violating trial is rejected by LM.
-    if (PinholeCameraModel::ImgFromCam(cams[o.cam].intr.data(), pc.x(), pc.y(),
-                                       pc.z(), &px, &py)) {
+    if (PinholeCameraModel::ImgFromCam(
+            cams[o.cam].intr.data(), pc.x(), pc.y(), pc.z(), &px, &py)) {
       const double dx = px - o.pixel.x(), dy = py - o.pixel.y();
       cost += dx * dx + dy * dy;
     } else {
@@ -564,10 +656,12 @@ double FullBACost(const std::vector<Camera>& cams,
 }
 
 // solve_mode: 0 = dense Schur LDLT, 1 = Power-BA power-series inverse Schur
-// (block mat-vecs B^-1 E C^-1 E^T, no factorization -- the GPU-friendly method).
+// (block mat-vecs B^-1 E C^-1 E^T, no factorization -- the GPU-friendly
+// method).
 double MetalFullBA(std::vector<Camera>& cams,
                    std::vector<Eigen::Vector3d>& pts,
-                   const std::vector<Obs>& obs, int max_iters,
+                   const std::vector<Obs>& obs,
+                   int max_iters,
                    int solve_mode = 0) {
   const int num_cams = static_cast<int>(cams.size());
   const int num_obs = static_cast<int>(obs.size());
@@ -594,18 +688,27 @@ double MetalFullBA(std::vector<Camera>& cams,
     // GPU: residuals + Jacobians at the current state (refill poses + points).
     for (int o = 0; o < num_obs; ++o) {
       const Camera& cm = cams[obs[o].cam];
-      poses[o * 7 + 0] = (float)cm.q.x(); poses[o * 7 + 1] = (float)cm.q.y();
-      poses[o * 7 + 2] = (float)cm.q.z(); poses[o * 7 + 3] = (float)cm.q.w();
-      poses[o * 7 + 4] = (float)cm.t.x(); poses[o * 7 + 5] = (float)cm.t.y();
+      poses[o * 7 + 0] = (float)cm.q.x();
+      poses[o * 7 + 1] = (float)cm.q.y();
+      poses[o * 7 + 2] = (float)cm.q.z();
+      poses[o * 7 + 3] = (float)cm.q.w();
+      poses[o * 7 + 4] = (float)cm.t.x();
+      poses[o * 7 + 5] = (float)cm.t.y();
       poses[o * 7 + 6] = (float)cm.t.z();
       const Eigen::Vector3d& X = pts[obs[o].point];
-      points[o * 3 + 0] = (float)X.x(); points[o * 3 + 1] = (float)X.y();
+      points[o * 3 + 0] = (float)X.x();
+      points[o * 3 + 1] = (float)X.y();
       points[o * 3 + 2] = (float)X.z();
     }
     std::vector<float> res(num_obs * 2), jct(num_obs * 12), jp(num_obs * 6);
-    if (!ComputePoseTangentJacMetalPinhole(num_obs, poses.data(), points.data(),
-                                           camsp.data(), obsp.data(), res.data(),
-                                           jct.data(), jp.data())) {
+    if (!ComputePoseTangentJacMetalPinhole(num_obs,
+                                           poses.data(),
+                                           points.data(),
+                                           camsp.data(),
+                                           obsp.data(),
+                                           res.data(),
+                                           jct.data(),
+                                           jp.data())) {
       return cost;
     }
 
@@ -639,10 +742,11 @@ double MetalFullBA(std::vector<Camera>& cams,
 
     bool accepted = false;
     for (int tries = 0; tries < 8 && !accepted; ++tries) {
-      // Damped point blocks C^{-1} and the camera rhs b = -g_cam + E C^{-1} g_pt.
-      // LM damping with a small diagonal floor so a structurally unconstrained
-      // direction (zero Hessian diagonal) can still be regularized -- pure
-      // relative scaling (d += lambda*d) would stay singular there.
+      // Damped point blocks C^{-1} and the camera rhs b = -g_cam + E C^{-1}
+      // g_pt. LM damping with a small diagonal floor so a structurally
+      // unconstrained direction (zero Hessian diagonal) can still be
+      // regularized -- pure relative scaling (d += lambda*d) would stay
+      // singular there.
       constexpr double kDiagFloor = 1e-9;
       std::vector<Eigen::Matrix3d> Cinv(pts.size());
       for (size_t p = 0; p < pts.size(); ++p) {
@@ -685,8 +789,8 @@ double MetalFullBA(std::vector<Camera>& cams,
         dcam = S.ldlt().solve(b);
       } else {
         // Power-BA: S^{-1} b = (sum_k M^k) B^{-1} b, M = B^{-1} E C^{-1} E^T.
-        // Each M*v is block mat-vecs (E^T, C^{-1}, E, B^{-1}) -- no factorization,
-        // exactly the structure a Metal/GPU solver parallelizes.
+        // Each M*v is block mat-vecs (E^T, C^{-1}, E, B^{-1}) -- no
+        // factorization, exactly the structure a Metal/GPU solver parallelizes.
         std::vector<Eigen::Matrix<double, 6, 6>> Binv(F);
         for (int c = 0; c < F; ++c) Binv[c] = Bd[c].inverse();
         auto apply_M = [&](const Eigen::VectorXd& v) {
@@ -703,11 +807,13 @@ double MetalFullBA(std::vector<Camera>& cams,
             e.segment<6>(6 * (obs[o].cam - 1)) += E[o] * a[obs[o].point];
           }
           Eigen::VectorXd Mv = Eigen::VectorXd::Zero(6 * F);
-          for (int c = 0; c < F; ++c) Mv.segment<6>(6 * c) = Binv[c] * e.segment<6>(6 * c);
+          for (int c = 0; c < F; ++c)
+            Mv.segment<6>(6 * c) = Binv[c] * e.segment<6>(6 * c);
           return Mv;
         };
         Eigen::VectorXd u(6 * F);
-        for (int c = 0; c < F; ++c) u.segment<6>(6 * c) = Binv[c] * b.segment<6>(6 * c);
+        for (int c = 0; c < F; ++c)
+          u.segment<6>(6 * c) = Binv[c] * b.segment<6>(6 * c);
         dcam = u;
         Eigen::VectorXd term = u;
         for (int k = 0; k < 50; ++k) {
@@ -741,7 +847,9 @@ double MetalFullBA(std::vector<Camera>& cams,
 
       const double cost_t = FullBACost(cams_t, pts_t, obs);
       if (cost_t < cost) {
-        cams = cams_t; pts = pts_t; cost = cost_t;
+        cams = cams_t;
+        pts = pts_t;
+        cost = cost_t;
         lambda = std::max(lambda * 0.3, 1e-12);
         accepted = true;
       } else {
@@ -783,12 +891,13 @@ TEST(BundleAdjustmentMetal, FullBAConvergesLikeCeres) {
       const Eigen::Vector3d pc = cams_true[c].q * pts_true[p] + cams_true[c].t;
       if (pc.z() <= 0.1) continue;
       const auto& ic = cams_true[c].intr;
-      obs.push_back({c, p,
-                     Eigen::Vector2d(
-                         ic[0] * pc.x() / pc.z() + ic[2] +
-                             RandomUniformReal<double>(-1, 1) * 0.5,
-                         ic[1] * pc.y() / pc.z() + ic[3] +
-                             RandomUniformReal<double>(-1, 1) * 0.5)});
+      obs.push_back(
+          {c,
+           p,
+           Eigen::Vector2d(ic[0] * pc.x() / pc.z() + ic[2] +
+                               RandomUniformReal<double>(-1, 1) * 0.5,
+                           ic[1] * pc.y() / pc.z() + ic[3] +
+                               RandomUniformReal<double>(-1, 1) * 0.5)});
     }
   }
 
@@ -797,7 +906,7 @@ TEST(BundleAdjustmentMetal, FullBAConvergesLikeCeres) {
   std::vector<Eigen::Vector3d> pts0 = pts_true;
   for (int c = 1; c < num_cams; ++c) {
     cams0[c].q = (cams0[c].q * Eigen::Quaterniond(Eigen::AngleAxisd(
-                      0.02, Eigen::Vector3d::UnitX())))
+                                   0.02, Eigen::Vector3d::UnitX())))
                      .normalized();
     cams0[c].t += Eigen::Vector3d(0.05, -0.05, 0.05);
   }
@@ -825,8 +934,12 @@ TEST(BundleAdjustmentMetal, FullBAConvergesLikeCeres) {
   std::vector<std::array<double, 4>> cere_intr(num_cams);
   std::vector<std::array<double, 3>> cere_pts(num_points);
   for (int c = 0; c < num_cams; ++c) {
-    cere_pose[c] = {cams0[c].q.x(), cams0[c].q.y(), cams0[c].q.z(),
-                    cams0[c].q.w(), cams0[c].t.x(), cams0[c].t.y(),
+    cere_pose[c] = {cams0[c].q.x(),
+                    cams0[c].q.y(),
+                    cams0[c].q.z(),
+                    cams0[c].q.w(),
+                    cams0[c].t.x(),
+                    cams0[c].t.y(),
                     cams0[c].t.z()};
     cere_intr[c] = cams0[c].intr;
   }
@@ -835,15 +948,18 @@ TEST(BundleAdjustmentMetal, FullBAConvergesLikeCeres) {
   ceres::Problem problem;
   for (const Obs& o : obs) {
     problem.AddResidualBlock(
-        ReprojErrorCostFunctor<PinholeCameraModel>::Create(o.pixel), nullptr,
-        cere_pts[o.point].data(), cere_pose[o.cam].data(),
+        ReprojErrorCostFunctor<PinholeCameraModel>::Create(o.pixel),
+        nullptr,
+        cere_pts[o.point].data(),
+        cere_pose[o.cam].data(),
         cere_intr[o.cam].data());
   }
   // cam_from_world is a 7-param [quat|trans] block -> product manifold (tangent
   // 6), matching the SE(3) tangent the Metal solver uses. Intrinsics fixed,
   // camera 0 fixed (gauge).
   for (int c = 0; c < num_cams; ++c) {
-    SetManifold(&problem, cere_pose[c].data(),
+    SetManifold(&problem,
+                cere_pose[c].data(),
                 CreateProductManifold(ceres::EigenQuaternionManifold(),
                                       ceres::EuclideanManifold<3>()));
     problem.SetParameterBlockConstant(cere_intr[c].data());
@@ -855,12 +971,16 @@ TEST(BundleAdjustmentMetal, FullBAConvergesLikeCeres) {
   options.logging_type = ceres::SILENT;
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
-  const double ceres_cost = 2.0 * summary.final_cost;  // Ceres cost = 0.5*sum r^2.
+  const double ceres_cost =
+      2.0 * summary.final_cost;  // Ceres cost = 0.5*sum r^2.
 
   std::printf(
       "[ba-metal] full BA: init cost %.3f -> Metal(dense) %.4f, "
       "Metal(Power-BA) %.4f, Ceres %.4f (dense rel %.2e, power rel %.2e)\n",
-      init_cost, metal_cost, power_cost, ceres_cost,
+      init_cost,
+      metal_cost,
+      power_cost,
+      ceres_cost,
       std::abs(metal_cost - ceres_cost) / ceres_cost,
       std::abs(power_cost - ceres_cost) / ceres_cost);
   // Both Metal solvers must optimize substantially and reach Ceres' minimum.

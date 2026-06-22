@@ -56,10 +56,14 @@ if(CASPAR_ENABLED)
     )
 endif()
 
-# Caspar-style Metal bundle-adjustment PoC (Apple only). The Objective-C++
-# implementation compiles under METAL_ENABLED; otherwise a stub reports the
-# backend unavailable so callers use the Ceres CPU path.
-list(APPEND ESTIMATORS_SRCS bundle_adjustment_metal.h)
+# Caspar-style Metal bundle-adjustment PoC (research only; gated by
+# BA_METAL_POC_ENABLED, default OFF -- see the root CMakeLists). When enabled,
+# the Objective-C++ implementation compiles on an Apple METAL_ENABLED build;
+# otherwise a stub reports the backend unavailable so the parity test links and
+# skips. Not wired into the BA pipeline; Ceres remains the production BA.
+if(BA_METAL_POC_ENABLED)
+    list(APPEND ESTIMATORS_SRCS bundle_adjustment_metal.h)
+endif()
 
 COLMAP_ADD_LIBRARY(
     NAME colmap_estimators
@@ -84,13 +88,10 @@ if(CASPAR_ENABLED)
     target_link_libraries(colmap_estimators PUBLIC caspar_lib_core)
 endif()
 
-if(METAL_ENABLED AND APPLE)
-    target_sources(colmap_estimators PRIVATE bundle_adjustment_metal.mm)
-    set_source_files_properties(bundle_adjustment_metal.mm PROPERTIES
-        COMPILE_FLAGS "-fobjc-arc")
-    target_link_libraries(colmap_estimators PRIVATE ${COLMAP_METAL_FRAMEWORKS})
-else()
-    target_sources(colmap_estimators PRIVATE bundle_adjustment_metal_stub.cc)
+if(BA_METAL_POC_ENABLED)
+    COLMAP_ADD_METAL_SOURCES(colmap_estimators
+        MM bundle_adjustment_metal.mm
+        STUB bundle_adjustment_metal_stub.cc)
 endif()
 
 if(CUDA_ENABLED)
@@ -112,11 +113,13 @@ COLMAP_ADD_TEST(
     SRCS bundle_adjustment_ceres_test.cc
     LINK_LIBS colmap_estimators
 )
-COLMAP_ADD_TEST(
-    NAME bundle_adjustment_metal_test
-    SRCS bundle_adjustment_metal_test.cc
-    LINK_LIBS colmap_estimators
-)
+if(BA_METAL_POC_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME bundle_adjustment_metal_test
+        SRCS bundle_adjustment_metal_test.cc
+        LINK_LIBS colmap_estimators
+    )
+endif()
 if(CASPAR_ENABLED)
     COLMAP_ADD_TEST(
         NAME bundle_adjustment_caspar_test

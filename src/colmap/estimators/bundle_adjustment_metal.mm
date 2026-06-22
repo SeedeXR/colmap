@@ -29,6 +29,8 @@
 
 #include "colmap/estimators/bundle_adjustment_metal.h"
 
+#include "colmap/util/logging.h"
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -48,12 +50,27 @@ constexpr char kReprojErrorSource[] = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
 
+// Smallest camera-frame depth w treated as "in front of the camera". Mirrors
+// PinholeCameraModel::ImgFromCam, which rejects w < numeric_limits<T>::epsilon().
+// These kernels are fp32, so the faithful analogue is the float epsilon
+// (FLT_EPSILON ~1.19e-7); the CPU/Ceres reference runs in fp64 (epsilon
+// ~2.2e-16). Points whose depth lies in the narrow band between the two are the
+// ONLY place the GPU and CPU can disagree on validity -- an inherent fp32 limit,
+// NOT the much wider 1e-6 cutoff this used to apply.
+constant float kMinValidDepth = 1.1920929e-7f;  // FLT_EPSILON.
+
 // Shared forward projection + projection-Jacobian core for the Pinhole model.
 // ALL reprojection kernels below go through this, so the math AND the
-// behind-camera guard live in exactly one place. valid=false (w <= 1e-6, point
-// at/behind the camera) mirrors PinholeCameraModel::ImgFromCam returning false;
-// callers then emit zero residual + zero Jacobian (the observation contributes
-// nothing), matching the CPU/Ceres path instead of producing inf/nan.
+// behind-camera guard live in exactly one place. valid=false means the point is
+// at/behind the camera (w < kMinValidDepth), mirroring
+// PinholeCameraModel::ImgFromCam returning false. For an invalid observation the
+// LINEARIZED contribution is zeroed (residual + Jacobian = 0): a behind-camera
+// term has no meaningful first-order expansion, and zeroing avoids inf/nan. The
+// NONLINEAR cost of an invalid observation is handled separately by PointCost (a
+// large penalty), so an LM trial that pushes a point behind a camera is still
+// rejected. The two policies are consistent and intentional: feasible terms
+// drive the step through their Jacobian, while an infeasible term contributes no
+// gradient pull but blocks acceptance through the cost.
 struct ReprojCore {
   bool valid;
   float u, v, w, inv_w;
@@ -74,7 +91,7 @@ static ReprojCore ComputeReprojCore(float qx, float qy, float qz, float qw,
   c.u = X + 2.0f * (qw * vxp0 + (qy * vxp2 - qz * vxp1)) + tx;
   c.v = Y + 2.0f * (qw * vxp1 + (qz * vxp0 - qx * vxp2)) + ty;
   c.w = Z + 2.0f * (qw * vxp2 + (qx * vxp1 - qy * vxp0)) + tz;
-  c.valid = c.w > 1e-6f;
+  c.valid = c.w >= kMinValidDepth;
   if (!c.valid) {
     c.inv_w = 0.0f;
     c.r0 = 0.0f;
@@ -101,6 +118,19 @@ static ReprojCore ComputeReprojCore(float qx, float qy, float qz, float qw,
   c.M[7] = 2.0f * (qy * qz + qw * qx);
   c.M[8] = 1.0f - 2.0f * (qx * qx + qy * qy);
   return c;
+}
+
+// J_point (2x3, row-major) = J_proj * R(q), written to a device buffer. Shared
+// by reproj_error_pinhole and pose_tangent_jac_pinhole so the assembly lives in
+// one place. (ReprojPointJac has a thread-memory variant; MSL address spaces
+// differ, so the two cannot share a single helper.)
+static void WriteJPoint(ReprojCore c, device float* jp) {
+  jp[0] = c.jpx0 * c.M[0] + c.jpx2 * c.M[6];
+  jp[1] = c.jpx0 * c.M[1] + c.jpx2 * c.M[7];
+  jp[2] = c.jpx0 * c.M[2] + c.jpx2 * c.M[8];
+  jp[3] = c.jpy1 * c.M[3] + c.jpy2 * c.M[6];
+  jp[4] = c.jpy1 * c.M[4] + c.jpy2 * c.M[7];
+  jp[5] = c.jpy1 * c.M[5] + c.jpy2 * c.M[8];
 }
 
 kernel void reproj_error_pinhole(constant uint& num_obs       [[buffer(0)]],
@@ -132,13 +162,7 @@ kernel void reproj_error_pinhole(constant uint& num_obs       [[buffer(0)]],
     return;
   }
 
-  // J_point (2x3) = J_proj * M.
-  jac_point[gid * 6 + 0] = c.jpx0 * c.M[0] + c.jpx2 * c.M[6];
-  jac_point[gid * 6 + 1] = c.jpx0 * c.M[1] + c.jpx2 * c.M[7];
-  jac_point[gid * 6 + 2] = c.jpx0 * c.M[2] + c.jpx2 * c.M[8];
-  jac_point[gid * 6 + 3] = c.jpy1 * c.M[3] + c.jpy2 * c.M[6];
-  jac_point[gid * 6 + 4] = c.jpy1 * c.M[4] + c.jpy2 * c.M[7];
-  jac_point[gid * 6 + 5] = c.jpy1 * c.M[5] + c.jpy2 * c.M[8];
+  WriteJPoint(c, jac_point + gid * 6);  // J_point (2x3) = J_proj * M.
 
   // d(R(q)*p) / dq (3x4) w.r.t. (qx,qy,qz,qw), original point (X,Y,Z). Matches
   // QuaternionRotatePointWithJac in reprojection_error.h.
@@ -357,13 +381,7 @@ kernel void pose_tangent_jac_pinhole(constant uint& num_obs   [[buffer(0)]],
     return;
   }
 
-  // J_point = J_proj * M.
-  jac_point[gid * 6 + 0] = c.jpx0 * c.M[0] + c.jpx2 * c.M[6];
-  jac_point[gid * 6 + 1] = c.jpx0 * c.M[1] + c.jpx2 * c.M[7];
-  jac_point[gid * 6 + 2] = c.jpx0 * c.M[2] + c.jpx2 * c.M[8];
-  jac_point[gid * 6 + 3] = c.jpy1 * c.M[3] + c.jpy2 * c.M[6];
-  jac_point[gid * 6 + 4] = c.jpy1 * c.M[4] + c.jpy2 * c.M[7];
-  jac_point[gid * 6 + 5] = c.jpy1 * c.M[5] + c.jpy2 * c.M[8];
+  WriteJPoint(c, jac_point + gid * 6);  // J_point (2x3) = J_proj * M.
 
   // M*[X]x (3x3), then d p_cam/d dtheta = -(M*[X]x).
   const float MX00 = c.M[1] * Z - c.M[2] * Y;
@@ -417,28 +435,53 @@ struct MetalContext {
       if (device == nil) return;
       queue = [device newCommandQueue];
       if (queue == nil) return;
+      // Log (rather than silently swallow) build failures, so a kernel that
+      // fails to compile on some toolchain is distinguishable from a machine
+      // that simply has no Metal GPU. A device that is merely absent returns
+      // early above without a warning; reaching here means the GPU exists but
+      // the PoC pipeline could not be built.
       NSError* error = nil;
       id<MTLLibrary> library = [device
           newLibraryWithSource:[NSString stringWithUTF8String:kReprojErrorSource]
                        options:nil
                          error:&error];
-      if (library == nil) return;
+      if (library == nil) {
+        LOG(WARNING) << "Metal BA PoC: kernel library failed to compile: "
+                     << (error != nil ? error.localizedDescription.UTF8String
+                                       : "unknown error");
+        return;
+      }
       id<MTLFunction> fn = [library newFunctionWithName:@"reproj_error_pinhole"];
       if (fn == nil) return;
       pipeline = [device newComputePipelineStateWithFunction:fn error:&error];
-      if (pipeline == nil) return;
+      if (pipeline == nil) {
+        LOG(WARNING) << "Metal BA PoC: reproj_error pipeline failed: "
+                     << (error != nil ? error.localizedDescription.UTF8String
+                                       : "unknown error");
+        return;
+      }
       id<MTLFunction> pts_fn =
           [library newFunctionWithName:@"refine_points_pinhole"];
       if (pts_fn == nil) return;
       points_pipeline =
           [device newComputePipelineStateWithFunction:pts_fn error:&error];
-      if (points_pipeline == nil) return;
+      if (points_pipeline == nil) {
+        LOG(WARNING) << "Metal BA PoC: refine_points pipeline failed: "
+                     << (error != nil ? error.localizedDescription.UTF8String
+                                       : "unknown error");
+        return;
+      }
       id<MTLFunction> tan_fn =
           [library newFunctionWithName:@"pose_tangent_jac_pinhole"];
       if (tan_fn == nil) return;
       tangent_pipeline =
           [device newComputePipelineStateWithFunction:tan_fn error:&error];
-      if (tangent_pipeline == nil) return;
+      if (tangent_pipeline == nil) {
+        LOG(WARNING) << "Metal BA PoC: pose_tangent pipeline failed: "
+                     << (error != nil ? error.localizedDescription.UTF8String
+                                       : "unknown error");
+        return;
+      }
       valid = true;
     }
   }
@@ -550,6 +593,20 @@ bool RefinePointsMetalPinhole(int num_points,
       point3D == nullptr || obs_offset == nullptr || obs_pose == nullptr ||
       obs_cam == nullptr || obs_pixel == nullptr) {
     return false;
+  }
+  // Validate the CSR offsets on the host. The kernel casts each obs_offset
+  // entry to uint and indexes obs_pose/obs_cam/obs_pixel with it; a negative,
+  // out-of-range, or non-monotonic offset would read out of bounds on the GPU
+  // (and a descending pair underflows the unsigned cast to ~4e9). Requiring
+  // 0 <= obs_offset[i] <= obs_offset[i+1] <= num_obs makes every index in
+  // [begin, end) provably < num_obs.
+  if (obs_offset[0] < 0 || obs_offset[num_points] > num_obs) {
+    return false;
+  }
+  for (int i = 0; i < num_points; ++i) {
+    if (obs_offset[i] > obs_offset[i + 1]) {
+      return false;
+    }
   }
 
   @autoreleasepool {

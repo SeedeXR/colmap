@@ -98,6 +98,22 @@ if(METAL_ENABLED)
     endif()
 endif()
 
+# Experimental Caspar-style Metal bundle-adjustment proof-of-concept
+# (branch: caspar-style). EXPERIMENTAL, research-only: its reprojection
+# factor + analytic Jacobians match Ceres but no end-to-end speed win was
+# demonstrated, and nothing in the BA pipeline calls it (Ceres remains the
+# production BA). Default OFF so a normal build -- including a normal Apple
+# METAL_ENABLED build -- does not compile the unused PoC sources or its test;
+# turn ON (with METAL_ENABLED on Apple) only to build/run its parity tests.
+# See memory/future_enhancements.md (Block E).
+option(BA_METAL_POC_ENABLED "Build the experimental Metal bundle-adjustment proof-of-concept (research only; not used in production)" OFF)
+if(BA_METAL_POC_ENABLED)
+    # Mirror the CASPAR_ENABLED / COLMAP_METAL_ENABLED pattern: expose a
+    # C++-visible macro so any future translation unit that includes
+    # bundle_adjustment_metal.h can guard its use of the PoC symbols.
+    add_compile_definitions(BA_METAL_POC_ENABLED)
+endif()
+
 # Disables default features, as we specify each required feature manually below.
 list(APPEND VCPKG_MANIFEST_FEATURES "core")
 
