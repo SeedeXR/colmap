@@ -4,6 +4,21 @@
 
 COLMAP is a general-purpose Structure-from-Motion (SfM) and Multi-View Stereo (MVS) pipeline that reconstructs 3D models from 2D image collections. Written in C++17 with optional CUDA support. Single binary (colmap) with many subcommands, a Qt GUI, and Python bindings (pycolmap).
 
+## macOS / Apple Silicon additions (this fork)
+
+This fork adds Metal (Apple GPU) acceleration and a production CLI/process contract on top of upstream COLMAP. All Apple-specific code is behind `__APPLE__` / `COLMAP_METAL_ENABLED` (CMake `-DMETAL_ENABLED=ON`, Apple-only, default OFF) and is a no-op elsewhere — Linux/Windows builds are unaffected (verified by a `METAL_ENABLED=OFF` build). Full history + rationale live in `memory/` (`todo.md`, `future_enhancements.md`, `testing_mechanism.md`). RAM discipline for this fork: 3–4 GB ideal, 6 GB hard cap.
+
+**Implemented / shipping:**
+- **Metal PatchMatch MVS** — `colmap patch_match_stereo` runs on macOS via Metal (no CUDA needed): `mvs/patch_match_metal.{h,mm,_stub.cc}` + `patch_match_metal_controller.cc`. Depth equivalent to the CUDA golden (median ~0.14%), peak RSS ~0.8 GB on south-building.
+- **Resource-aware feature extraction** — CPU SIFT threads auto-sized to a RAM budget (`--FeatureExtraction.max_memory_gb`); large-image `first_octave=0` hint. CPU SIFT is the only macOS extractor (SiftGPU needs OpenGL/CUDA).
+- **Process contract** — structured `--progress_format jsonl` events (`util/progress`), cooperative SIGINT/SIGTERM stop with **partial reconstruction save** + exit codes 130/143 (`util/signal_handler`, `BaseController::CheckIfStopped` defaults to the interrupt flag, `exe/sfm.cc`), Ceres + vocab-tree **heartbeats** (`HeartbeatThrottle` in `util/progress`), grouped `--help`.
+- **Perf harnesses** — `scripts/macos/pipeline_regression.sh` (absolute RAM/quality budget) + `scripts/macos/perf_baseline.sh` (relative drift vs a stored baseline); shared helpers in `scripts/macos/_metrics_lib.sh`.
+
+**Deliberate DECISIONS (do not re-litigate without new data):**
+- **Feature matching stays on CPU.** A Metal MPS matcher was implemented, benchmarked, then **REMOVED** — on Apple Silicon the CPU matcher is faster (per-pair GPU dispatch overhead) with identical output. `--FeatureMatching.use_gpu` defaults to 0; do NOT re-add a Metal matcher.
+- **SIFT-on-Metal skipped** (CPU already fast/in-budget, not the bottleneck); **GPU vocab-tree skipped** (FAISS has no Metal backend); **CoreML EP stays OFF** (~50× slower / OOM when benchmarked).
+- **Caspar-style Metal bundle adjustment = EXPERIMENTAL, branch `caspar-style` only, NOT for production.** Output equivalent to Ceres but no end-to-end speed win demonstrated; Ceres remains the BA. `estimators/bundle_adjustment_metal.*` is research-only and not wired into the BA pipeline.
+
 ## Directory Structure
 
 | Path | Description |
